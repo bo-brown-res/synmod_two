@@ -147,7 +147,6 @@ class MarkovChain(Generator):
             self.sample = None  # Function to sample from state distribution
             if self._chain._feature_type == NUMERIC:
                 self._summary_stats = SummaryStats(None, None)
-            self.categorical_stability_scaler = kwargs['categorical_stability_scaler']
             self.variance_scaler = kwargs.get("variance_scaler", 1)
             self.threshold = None
             self.bin_order = None
@@ -180,7 +179,7 @@ class MarkovChain(Generator):
 
             #Updating probabilities such that categorical values are more likely to maintain the same value over time
             probs = rng.uniform(size=n_states)
-            self._p = [x if x != self._index else x*self.categorical_stability_scaler for x in probs]
+            self._p = [x if x != self._index else x for x in probs]
 
             mean = rng.uniform(0.1)
             sd = (rng.uniform(0.1) * 0.05) * self.variance_scaler
@@ -211,6 +210,7 @@ class MarkovChain(Generator):
     def __init__(self, rng, feature_type, window, **kwargs):
         super().__init__(rng, feature_type, window)
         n_states = 1
+
         self.n_categories = kwargs.get("n_categories", self._rng.integers(3, 5, endpoint=True))
         self._window_independent = kwargs.get("window_independent", False)  # Sampled state independent of window location
 
@@ -219,6 +219,7 @@ class MarkovChain(Generator):
         self._init_value = self._rng.uniform(-1, 1)  # Initial value of Markov chain, used for trends
         self._trend_start_prob = np.random.uniform(0,kwargs['trend_start_scaler'])
         self._trend_stop_prob = np.random.uniform(0,kwargs['trend_stop_scaler'])
+        self._trend_strength = np.random.uniform(0, 0.2)
         self._is_trending = False
 
         # Select states inside and outside window
@@ -232,16 +233,18 @@ class MarkovChain(Generator):
         for state in states:
             state.gen_distributions()
 
-            state.bin_order = list(range(self.n_categories))
-            np.random.shuffle(state.bin_order)
-            if feature_type == 'binary':
-                mean_shift = state._chain._rng.uniform(-state.sd*2, state.sd*2) #2 SDs covers 95% of the probabilty disrib
-                bin_threshold = state._chain._rng.normal(state.mean+mean_shift, state.sd*(2/state.categorical_stability_scaler)) #2 is default value here
-                state.threshold = np.array([-np.inf] + [bin_threshold] + [np.inf])
-            else:
-                base_threshold = [(x*state.sd*state.categorical_stability_scaler) for x in range(0, self.n_categories-1)]
-                threshold_divider_mean = np.mean(base_threshold) #np.mean([y[0] for y in base_threshold]) #not a perfectly clean divide, but keeps things a bit more balanced
-                state.threshold = [state.mean+(y-threshold_divider_mean) for y in base_threshold]
+            #Rearranging the ordering to be a circle with starting point of the default category (dfcg)
+            # bin_order = list(range(self.n_categories))
+            # dfcg = np.random.choice(bin_order)
+            # hcl = self.n_categories // 2
+            # ml = len(bin_order)
+            # state.bin_order = bin_order[min(ml, dfcg+1+hcl):][::-1] + bin_order[max(0,dfcg-hcl):min(ml,dfcg+1+hcl)] + bin_order[:max(0,dfcg-hcl)][::-1]
+
+            if feature_type == 'binary' or feature_type == 'categorical':
+                starting_category = state._chain._rng.choice(list(range(self.n_categories)))
+
+                base_threshold = [(x * state.sd * 2) for x in range(-starting_category, self.n_categories-starting_category-1)]
+                state.threshold = [state.mean + (y ) for y in base_threshold]
                 state.threshold = np.array([-np.inf] + state.threshold + [np.inf])
 
     def sample(self, sequence_length, **kwargs):
@@ -304,7 +307,7 @@ class MarkovChain(Generator):
         # Update  trending
         if self._trends and timepoint >= 1:
             if self._is_trending:
-                self._is_trending = True if 1 == np.random.binomial(n=1, p=1-self._trend_stop_prob) else False
+                self._is_trending = False if 1 == np.random.binomial(n=1, p=self._trend_stop_prob) else True
             else:
                 self._is_trending = True if 1 == np.random.binomial(n=1, p=self._trend_start_prob) else False
 
@@ -313,17 +316,8 @@ class MarkovChain(Generator):
             prev_val = 0 if np.isnan(prev_time_feat_vals[feature_id, timepoint-1]) else prev_time_feat_vals[feature_id, timepoint-1]
             cur_state.mean = prev_val
             value = cur_state.sample()
-            #trend_factor = np.random.uniform(0,cur_state._chain._max_trend_impact)
-            #value = prev_val + (cur_state.sample() * trend_factor)
         else:
             value = cur_state.sample()
-
-        #Reset the current state to its original values, so that we don't unintentionally propagate changes down the chain
-        # if self._feature_type == NUMERIC:
-        #     dep_scale_on_prev_time = 0.001
-            #cur_state.mean = old_mean + (dep_scale_on_prev_time * value)
-            #denom = len(dependencies) if len(dependencies) > 0 else 1
-            #cur_state.mean = value #+ (np.random.choice([-1,1]) * (value) * dep_scale_on_prev_time)
 
         # Set next state
         cur_state = cur_state.transition()

@@ -25,3 +25,37 @@ class JSONEncoderPlus(json.JSONEncoder):
         if isinstance(o, np.ndarray):
             return o.tolist()
         return super().default(o)
+
+def strtobool(val):
+    val = val.lower()
+    if val in ("y", "yes", "t", "true", "on", "1"):
+        return 1
+    elif val in ("n", "no", "f", "false", "off", "0"):
+        return 0
+    else:
+        raise ValueError(f"invalid truth value {val!r}")
+
+def strtointlist(val):
+    try:
+        val = [int(x) for x in val.split(",")]
+    except:
+        raise ValueError()
+    return val
+
+def argstr_to_list(value, name, args):
+    try:
+        vals = value.split(",")
+        if len(vals) == args.num_features:
+            dat = np.array([float(x) for x in vals])
+        elif len(vals) == 1:
+            dat = np.array([float(value) for x in range(args.num_features)])
+        else:
+            raise IndexError(
+                f"Argument '{name}' is not valid. Number of probabilities is {len(vals)} and should be either 1 or {args.num_features}.")
+    except Exception as ex:
+        if isinstance(ex, IndexError):
+            raise ex
+        else:
+            raise Exception(f"Argument '{name}' is not numeric or incorrect number of values.")
+
+    return dat
