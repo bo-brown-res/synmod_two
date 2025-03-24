@@ -59,3 +59,16 @@ def argstr_to_list(value, name, args):
             raise Exception(f"Argument '{name}' is not numeric or incorrect number of values.")
 
     return dat
+
+
+def discretize_categoricals(ts_sample, feature, feature_id):
+    f_vals = ts_sample[feature_id]
+    for time_point, val in enumerate(f_vals):
+        which_lower = np.argwhere(feature.threshold <= val).max()
+        # which_higher = np.argwhere(self.threshold > val).min()
+        return which_lower
+
+
+
+def generate_obs_masks(ts_sample, feature, feature_id):
+   pass

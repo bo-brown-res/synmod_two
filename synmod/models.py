@@ -12,7 +12,7 @@ import sympy
 from sympy.utilities.lambdify import lambdify
 
 from synmod import constants
-from synmod.aggregators import Aggregator, TabularAggregator
+from synmod.aggregators import Aggregator
 
 Polynomial = namedtuple("Polynomial", ["relevant_feature_map", "sym_polynomial_fn", "polynomial_fn"])
 
@@ -92,15 +92,13 @@ def get_model(args, features, instances):
     # Select relevant features
     relevant_features = get_relevant_features(args)
     polynomial = gen_polynomial(args, relevant_features)
-    if args.synthesis_type == constants.TABULAR:
-        aggregator = TabularAggregator()
-    else:
-        # Select time window for each feature
-        windows = [feature.window for feature in features]
-        for fid, _ in enumerate(features):
-            relevance = "relevant" if fid in relevant_features else "irrelevant"
-            args.logger.info(f"Window for {relevance} feature id {fid}: ({windows[fid][0]}, {windows[fid][1]})")
-        aggregator = Aggregator([feature.aggregation_fn for feature in features], windows, instances, args.standardize_features)
+
+    # Select time window for each feature
+    windows = [feature.window for feature in features]
+    for fid, _ in enumerate(features):
+        relevance = "relevant" if fid in relevant_features else "irrelevant"
+        args.logger.info(f"Window for {relevance} feature id {fid}: ({windows[fid][0]}, {windows[fid][1]})")
+    aggregator = Aggregator([feature.aggregation_fn for feature in features], windows, instances, args.standardize_features)
     # Select model
     model_class = {constants.CLASSIFIER: Classifier, constants.REGRESSOR: Regressor}[args.model_type]
     return model_class(aggregator, polynomial, instances)

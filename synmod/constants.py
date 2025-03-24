@@ -16,7 +16,6 @@ CLASSIFIER = "classifier"
 REGRESSOR = "regressor"
 
 # Synthesis types
-TABULAR = "tabular"
 TEMPORAL = "temporal"
 
 # Output files

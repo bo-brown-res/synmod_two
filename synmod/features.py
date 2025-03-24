@@ -4,9 +4,8 @@ from abc import ABC
 
 import numpy as np
 
-from synmod.constants import BINARY, CATEGORICAL, NUMERIC, TABULAR, CONSTANT
-from synmod.generators import BernoulliDistribution, CategoricalDistribution, NormalDistribution
-from synmod.generators import BernoulliProcess, MarkovChain
+from synmod.constants import BINARY, CATEGORICAL, NUMERIC, CONSTANT
+from synmod.generators import RandomWalk
 from synmod.aggregators import Max, get_aggregation_fn_cls
 from synmod.utils import argstr_to_list
 
@@ -28,45 +27,6 @@ class Feature(ABC):
         return dict(name=self.name,
                     type=self.__class__.__name__)
 
-
-class TabularFeature(Feature):
-    """Tabular feature"""
-    def __init__(self, name, seed_seq):
-        super().__init__(name, seed_seq)
-        self.generator = None
-
-    def sample(self, *args, **kwargs):
-        """Sample value from generator"""
-        return self.generator.sample()
-
-    def summary(self):
-        summary = super().summary()
-        summary.update(dict(generator=self.generator.summary()))
-        return summary
-
-
-class TabularBinaryFeature(TabularFeature):
-    """Tabular binary feature"""
-    def __init__(self, name, seed_seq):
-        super().__init__(name, seed_seq)
-        self.generator = BernoulliDistribution(self._rng)
-
-
-class TabularCategoricalFeature(TabularFeature):
-    """Tabular binary feature"""
-    def __init__(self, name, seed_seq):
-        super().__init__(name, seed_seq)
-        self.generator = CategoricalDistribution(self._rng)
-
-
-class TabularNumericFeature(TabularFeature):
-    """Tabular binary feature"""
-    def __init__(self, name, seed_seq):
-        super().__init__(name, seed_seq)
-        generator_class = self._rng.choice([NormalDistribution])
-        self.generator = generator_class(self._rng)
-
-
 class TemporalFeature(Feature):
     """Base class for features that take a sequence of values"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls):
@@ -78,14 +38,11 @@ class TemporalFeature(Feature):
         self.window_important = False
         self.ordering_important = False
         self.window_ordering_important = False
+        self.interactions = None
 
     def sample(self, *args, **kwargs):
         """Sample sequence from generator"""
         return self.generator.sample(*args, **kwargs)
-
-    def sample_single_MC_timepoint(self, *args, **kwargs):
-        """Sample sequence from generator"""
-        return self.generator.sample_single_timepoint(*args, **kwargs)
 
     def summary(self):
         summary = super().summary()
@@ -106,6 +63,84 @@ class TemporalFeature(Feature):
                 preds[:,time] = self.aggregation_fn.operate(instances[:, w_start: w_end + 1]).flatten()
         return preds
 
+    def sample_timepoint(self, args, time_point, ts_sample, feature_id, **kwargs):
+        raw_value =  self.generator.sample(sequence_length=1)
+        final_value = raw_value.item()
+
+        credit_assignment = [{'fid': feature_id, 'loc': time_point, 'val': raw_value}]
+
+        for interaction in self.interactions:
+            if time_point + interaction['w_start'] >= 0: #dont need to acount for partial values on account of burn-in period
+                inter_fid = interaction['inter_fid'].item()
+                inter_subsample = ts_sample[inter_fid, time_point + interaction['w_start']:time_point + interaction['w_end'] + 1].flatten()
+
+                if interaction['w_fn'] == 'mean':
+                    for i, x in enumerate(inter_subsample):
+                        contribution = (x * interaction['inter_scale']) / len(inter_subsample)
+                        final_value += contribution
+                        contrib_dict= {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + i, 'val':contribution}
+                        credit_assignment.append(contrib_dict)
+                elif interaction['w_fn'] == 'min':
+                    min_loc = np.argmin(inter_subsample)
+                    contribution = (inter_subsample[min_loc] * interaction['inter_scale'])
+                    final_value += contribution
+                    contrib_dict = {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + min_loc, 'val': contribution}
+                    credit_assignment.append(contrib_dict)
+                elif interaction['w_fn'] == 'max':
+                    max_loc = np.argmax(inter_subsample)
+                    contribution = (inter_subsample[max_loc] * interaction['inter_scale'])
+                    final_value += contribution
+                    contrib_dict = {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + max_loc, 'val': contribution}
+                    credit_assignment.append(contrib_dict)
+                else:
+                    raise NotImplementedError()
+
+        return final_value, credit_assignment
+
+
+        # if cur_state is None:
+        #     cur_state = self._rng.choice(self._out_window_states)  # default state
+        # # value = self._init_value  # TODO: what if value is re-initialized for every sequence sampled? (trends)
+        # left, right = self._window
+        #
+        # if not self._window_independent:
+        #     # Reset initial state in/out of window
+        #     if timepoint >= left:
+        #         cur_state = self._rng.choice(self._in_window_states)
+        #     elif timepoint <= right:
+        #         cur_state = self._rng.choice(self._out_window_states)
+        #
+        # if self._feature_type == NUMERIC:
+        #     old_mean = cur_state.mean  # cur_state.mean
+        #     # Update cur_state parameters based on previous values
+        #     for d in dependencies:
+        #         start = max(0, timepoint + int(d[2]))
+        #         end = max(0, timepoint + int(d[3]))
+        #         mean_update = d[4](d[1] * prev_time_feat_vals[d[0], start:end])
+        #         mean_update = 0 if np.isnan(mean_update) else mean_update
+        #         cur_state.mean += mean_update
+        #
+        # # Update  trending
+        # if self._trends and timepoint >= 1:
+        #     if self._is_trending:
+        #         self._is_trending = False if 1 == np.random.binomial(n=1, p=self._trend_stop_prob) else True
+        #     else:
+        #         self._is_trending = True if 1 == np.random.binomial(n=1, p=self._trend_start_prob) else False
+        #
+        # # Get value
+        # if self._is_trending:
+        #     prev_val = 0 if np.isnan(prev_time_feat_vals[feature_id, timepoint - 1]) else prev_time_feat_vals[
+        #         feature_id, timepoint - 1]
+        #     cur_state.mean = prev_val
+        #     value = cur_state.sample()
+        # else:
+        #     value = cur_state.sample()
+        #
+        # # Set next state
+        # cur_state = cur_state.transition()
+        #
+        # return value, cur_state
+
 
     def get_prediction_window(self, sequence_length):
         """Randomly select a window for the feature where the model should operate in"""
@@ -122,7 +157,7 @@ class BinaryFeature(TemporalFeature):
     """Binary feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
         super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
-        generator_class = MarkovChain
+        generator_class = RandomWalk
         kwargs["n_categories"] = 2
 
         self.generator = generator_class(self._rng, BINARY, self.window, **kwargs)
@@ -132,7 +167,7 @@ class CategoricalFeature(TemporalFeature):
     """Categorical feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
         super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
-        generator_class = MarkovChain
+        generator_class = RandomWalk
         kwargs["n_categories"] = kwargs.get("n_states", self._rng.integers(3, 5, endpoint=True))
         self.generator = generator_class(self._rng, CATEGORICAL, self.window, **kwargs)
 
@@ -142,7 +177,7 @@ class ConstantFeature(TemporalFeature):
     """Constant feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
         super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
-        generator_class = MarkovChain
+        generator_class = RandomWalk
         self.generator = generator_class(self._rng, CONSTANT, self.window, **kwargs)
         self.constant_value = None
 
@@ -155,7 +190,7 @@ class NumericFeature(TemporalFeature):
     """Numeric feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
         super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
-        generator_class = MarkovChain
+        generator_class = RandomWalk
         self.generator = generator_class(self._rng, NUMERIC, self.window, **kwargs)
 
 
@@ -163,33 +198,23 @@ def get_feature(args, fid):
     """Return randomly selected feature"""
     seed_seq = args.rng.bit_generator._seed_seq.spawn(1)[0]  # pylint: disable = protected-access
     name = str(fid)
+    aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
 
-    if args.synthesis_type == TABULAR:
-        feature_class = args.rng.choice([TabularBinaryFeature, TabularCategoricalFeature, TabularNumericFeature],
-                                        p=args.feature_type_distribution)
-        args.logger.info(f"Generating feature class {feature_class.__name__}")
-        return feature_class(name, seed_seq)
-    else:
-        aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
+    kwargs = {"window_independent": args.window_independent}
+    kwargs['trend_start_scaler'] = args.trend_start_scaler
+    kwargs['trend_stop_scaler'] = args.trend_stop_scaler
+    kwargs['variance_scaler'] = argstr_to_list(args.variance_scaler, 'variance_scaler', args)[fid]
+    kwargs['observation_prob'] = argstr_to_list(args.observation_prob, 'observation_prob', args)[fid]
 
-        observation_prob = argstr_to_list(args.observation_prob, 'observation_prob', args)[fid]
-        variance_scaler = argstr_to_list(args.variance_scaler, 'variance_scaler', args)
+    feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
+    if aggregation_fn_cls is Max:
+        # Avoid low-variance features by sampling numeric or high-state-count categorical feature
+        feature_class = args.rng.choice([CategoricalFeature, NumericFeature], p=[0.25, 0.75])
+        # if feature_class == CategoricalFeature:
+        #     kwargs["n_states"] = args.rng.integers(4, 5, endpoint=True)
 
-        kwargs = {"window_independent": args.window_independent}
-        kwargs['variance_scaler'] = variance_scaler
-        kwargs['trend_start_scaler'] = args.trend_start_scaler
-        kwargs['trend_stop_scaler'] = args.trend_stop_scaler
-        kwargs['observation_prob'] = observation_prob
+    feature = feature_class(name, seed_seq, args.expected_seq_length, aggregation_fn_cls, **kwargs)
+    args.logger.info(f"Generating feature class {feature_class.__name__} with window {feature.window} and"
+                     f" aggregation_fn {aggregation_fn_cls.__name__}")
 
-        feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
-        if aggregation_fn_cls is Max:
-            # Avoid low-variance features by sampling numeric or high-state-count categorical feature
-            feature_class = args.rng.choice([CategoricalFeature, NumericFeature], p=[0.25, 0.75])
-            # if feature_class == CategoricalFeature:
-            #     kwargs["n_states"] = args.rng.integers(4, 5, endpoint=True)
-
-        feature = feature_class(name, seed_seq, args.expected_seq_length, aggregation_fn_cls, **kwargs)
-        args.logger.info(f"Generating feature class {feature_class.__name__} with window {feature.window} and"
-                         f" aggregation_fn {aggregation_fn_cls.__name__}")
-
-        return feature
+    return feature

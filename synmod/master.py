@@ -15,8 +15,8 @@ import numpy as np
 from synmod import constants
 from synmod import features as F
 from synmod import models as M
-from synmod.features import ConstantFeature
-from synmod.utils import get_logger, JSONEncoderPlus, strtobool, strtointlist
+from synmod.features import ConstantFeature, CategoricalFeature, BinaryFeature
+from synmod.utils import get_logger, JSONEncoderPlus, strtobool, strtointlist, discretize_categoricals
 
 
 def synthesize(**kwargs):
@@ -39,7 +39,7 @@ def main(strargs=None):
     required.add_argument("-num_instances", help="Number of instances",
                           type=int, required=True)
     required.add_argument("-synthesis_type", help="Type of data/model synthesis to perform",
-                          choices=[constants.TEMPORAL, constants.TABULAR], required=True)
+                          choices=[constants.TEMPORAL], required=True)
 
     # Optional common arguments
     common = parser.add_argument_group("Common optional parameters")
@@ -58,8 +58,7 @@ def main(strargs=None):
 
     # Temporal synthesis arguments
     temporal = parser.add_argument_group("Temporal synthesis parameters")
-    temporal.add_argument("-expected_seq_length", help="Expected length of regularly sampled sequence",
-                          type=int) #TODO: Fix
+
     # TODO: Make sequences dependent on windows by default to avoid unpredictability
     temporal.add_argument("-sequences_independent_of_windows", help="If enabled, Markov chain sequence data doesn't depend on timesteps being"
                           " inside vs. outside the window (default random)", type=strtobool, dest="window_independent")
@@ -77,21 +76,27 @@ def main(strargs=None):
                           type=str, default="1.0") #TODO: Fix
 
     #Interaction parameters
-    temporal.add_argument("-max_feature_interactions", help="Maximum number of other features any one feature can interact with",
+    temporal.add_argument("-interactions_max", help="Maximum number of other features any one feature can interact with",
                           type=int, default=0) #TODO: Fix
-    temporal.add_argument("-interaction_prob", help="The probability of one feature having an interaction with any other feature.",
+    temporal.add_argument("-interactions_probability", help="The probability of one feature having an interaction with any other feature.",
                           type=float) #TODO: Fix
-    temporal.add_argument("-interaction_range",
+    temporal.add_argument("-interactions_range",
                           help="Defines the indices relative to the current time point from which the dependency window start point can be sampled. Defaults to '-5,1', ",
                           type=strtointlist, default='-5,-1') #TODO: Fix
-
-
-    temporal.add_argument("-interact_window_size",
+    temporal.add_argument("-interactions_len",
                           help="The size of the interaction window (how many of the previous time points for feature A can influence the value of feature B)",
+                          type=int) #TODO: Fix
+    temporal.add_argument("-interaction_scale",
+                          help="Specifies a maximum for the strength of dependencies.",
+                          type=float,
+                          default=0.1) #TODO: Fix
+
+    temporal.add_argument("-expected_seq_length", help="Expected length of a sequence, sampled from a geometric dsitribution",
                           type=int) #TODO: Fix
     temporal.add_argument("-min_seq_length",
                           help="Scaling factor for how much more likely a categorical variable is to keep its value over time point",
-                          type=float) #TODO: Fix
+                          type=int, default=1) #TODO: Fix
+
     temporal.add_argument("-variance_scaler",
                           help="Scaler applied to the variance of the gaussian from which values are sampled. Either a float applied to all values, or a list of values (one per feature)",
                           type=str,
@@ -99,19 +104,15 @@ def main(strargs=None):
     temporal.add_argument("-trend_start_scaler",
                           help="Scaling factor for how likely a trend is to start in a trend-enabled variable at any given time point.",
                           type=float,
-                          default=1) #TODO: Fix
+                          default=0.1) #TODO: Fix
     temporal.add_argument("-trend_stop_scaler",
                           help="Scaling factor for how likely a trend is to stop in a trend-enabled variable that has started trending.",
                           type=float,
-                          default=1) #TODO: Fix
-    temporal.add_argument("-max_dependency",
-                          help="Specifies a maximum for the strength of dependencies.",
-                          type=float,
                           default=0.1) #TODO: Fix
-    temporal.add_argument("-use_burn_in",
-                          help="Choice of using burn in period or not - with burn in period, all values are generated with the same linear gaussian. Without burn in, values at the start of the seqeunce come from linear gaussians that do not have access to some previous (not yet generated) dependency values.",
-                          type=bool,
-                          default=True)
+    # temporal.add_argument("-use_burn_in",
+    #                       help="Choice of using burn in period or not - with burn in period, all values are generated with the same linear gaussian. Without burn in, values at the start of the seqeunce come from linear gaussians that do not have access to some previous (not yet generated) dependency values.",
+    #                       type=bool,
+    #                       default=True)
 
     args = parser.parse_args(args=strargs)
     if args.synthesis_type == constants.TEMPORAL:
@@ -192,7 +193,7 @@ def pipeline(args):
     configure(args)
     args.logger.info(f"Begin generating sequence data with args: {args}")
     features = generate_features(args)
-    instances, seq_lengths = generate_instances(args, features)
+    instances, masks = generate_instances(args, features)
     model = M.get_model(args, features, instances)
     ground_truth_estimation(args, features, instances, model)
     write_outputs(args, features, instances, model)
@@ -205,115 +206,98 @@ def pipeline(args):
     return features, instances, model
 
 
-def assign_interfeature_dependencies(args, fid):
-    possible_dependency_fids = np.random.choice([x for x in range(args.num_features) if x != fid], args.max_feature_interactions)
-    dependency_probs = [args.interaction_prob / (len(possible_dependency_fids) - 1) for x in possible_dependency_fids]
+def assign_interfeature_dependencies(args, features):
+    interaction_matrix = np.random.random([len(features), len(features)])
+    np.fill_diagonal(interaction_matrix, 999, wrap=False) #make sure the diagonal is always greater than interaction probability so no feature can have an interaction with itself
+    interaction_range = args.interactions_range
+    window_possible_start, window_possible_end = min(interaction_range), max(interaction_range)
+    window_possible = list(range(window_possible_start, (window_possible_end + 1)))
 
-    f_depend_ids = [x for x in np.random.choice(possible_dependency_fids, p=dependency_probs, size=args.max_feature_interactions) if
-                    x is not None]
+    for x in interaction_range:
+        assert x<0, f"The argument 'interaction_range' with value {interaction_range} should consist of only 0 or negative numbers, i.e. -5,-1."
 
-    # the important window should be relative to the end of seqeunce - i.e. relative to discharge or mortality for IHM prediction
-    dependency_window = [int(x.strip()) for x in args.interact_window_range.split(",")]
-    if -1 in dependency_window:
-        w_end = min(dependency_window)
-        w_start = max(dependency_window)
-    else:
-        w_start = min(dependency_window)
-        w_end = max(dependency_window)
+    for fid, feature in enumerate(features):
+        f_rand_gen = feature.generator._rng
+        interactions_locs = np.argwhere(interaction_matrix[fid] <= args.interactions_probability)
+        if len(interactions_locs) > args.interactions_max:
+            interactions_locs = f_rand_gen.choice(interactions_locs, args.interactions_max)
 
-    window_possible = list(range(-w_start, -(w_end + 1)))
+        interactions = []
+        for int_loc in interactions_locs:
+            # the important window should be relative to the end of sequence - i.e. relative to discharge or mortality for IHM prediction
 
-    dependencies = []
-    for d in f_depend_ids:
-        d_scale_factor = np.random.uniform(-args.max_dependency, args.max_dependency)
-        window_start = np.random.choice(window_possible, size=1)
-        window_end = min(0, window_start + args.interact_window_size)
-        dependencies.append((d, d_scale_factor, window_start, window_end, np.mean))
-    feature.dependencies = dependencies
+            interaction_scale = f_rand_gen.uniform(-args.interaction_scale, args.interaction_scale)
+            window_start = f_rand_gen.choice(window_possible, size=1)[0]
+            window_end = min(-1, window_start + args.interactions_len)
+            window_aggregation_fn_idx = f_rand_gen.choice([0,1,2])
+            window_aggregation_function = ['mean', 'min', 'max'][window_aggregation_fn_idx]
+            interactions.append({'inter_fid':int_loc, 'inter_scale':interaction_scale, 'w_start':window_start, 'w_end':window_end, 'w_fn':window_aggregation_function})
+
+        feature.interactions = interactions
 
 
 def generate_features(args):
     """Generate features"""
-    def check_feature_variance(args, feature):
-        """Check variance of feature's raw/temporally aggregated values"""
-        if args.synthesis_type == constants.TABULAR:
-            instances = np.array([feature.sample() for _ in range(constants.VARIANCE_TEST_COUNT)])
-            aggregated = instances
-        else:
-            instances = np.array([feature.sample(args.expected_seq_length) for _ in range(constants.VARIANCE_TEST_COUNT)])
-            #left, right = feature.window
-            aggregated = feature.predict(instances, feature.window)
-        return np.all(np.var(aggregated, axis=-1) > 1e-10)
-
-
-
-    # TODO: allow across-feature interactions
     features = [None] * args.num_features
     fid = 0
     while fid < args.num_features:
         #Generate a feature
         feature = F.get_feature(args, fid)
 
-        if not check_feature_variance(args, feature):
-            # Reject feature if its raw/aggregated values have low variance
-            args.logger.info(f"Rejecting feature {feature.__class__} due to low variance")
-            continue
         features[fid] = feature
         fid += 1
 
-    if args.max_feature_interactions > 0:
-        assign_interfeature_dependencies(features)
+    if args.interactions_max > 0:
+        assign_interfeature_dependencies(args, features)
 
     return features
 
 
-def sample_with_dependency(args, features, cur_seq_len, **kwargs):
-    prev_time_feat_vals = np.zeros((len(features), cur_seq_len))
+def sample_time_series(args, features, generation_length, **kwargs):
+    #for each time point, generate a value for each of the features
+    ts_sample = np.zeros((len(features), generation_length))
 
-    from synmod.features import NumericFeature
+    for time_point in range(generation_length):
+        for feature_id, feature in enumerate(features):
+            # mask = np.random.choice([np.nan, 1], size=cur_seq_len, p=[1 - features[feature_id].observation_probability, features[feature_id].observation_probability])
+            val, credit = feature.sample_timepoint(args, time_point, ts_sample, feature_id, **kwargs)
+            ts_sample[feature_id, time_point] = val
+
+    #TODO: discretize categoricals here
+    # TODO: generate masks
     for feature_id, feature in enumerate(features):
-        cur_state = None
-        if isinstance(feature, ConstantFeature):
-            mask = np.random.choice([np.nan, 1], size=cur_seq_len, p=[1 - features[feature_id].observation_probability, features[feature_id].observation_probability])
-            f_t_val, cur_state = feature.sample_single_MC_timepoint(args, cur_state, 0, prev_time_feat_vals, feature_id, feature.dependencies, **kwargs)
-            prev_time_feat_vals[feature_id, :] = f_t_val
-            prev_time_feat_vals[feature_id, :] = prev_time_feat_vals[feature_id, :] * mask
-        else:
-            for timepoint in range(cur_seq_len):
-                mask = np.random.choice([0, 1], size=1, p=[1 - features[feature_id].observation_probability, features[feature_id].observation_probability])
-                f_t_val, cur_state = feature.sample_single_MC_timepoint(args, cur_state, timepoint, prev_time_feat_vals, feature_id, feature.dependencies, **kwargs)
-                prev_time_feat_vals[feature_id, timepoint] = f_t_val if mask.item() == 1 else np.nan
+        if isinstance(feature, ConstantFeature): #set the constant feature value to be whatever was first sampled
+            ts_sample[feature_id, :] = ts_sample[feature_id, 0]
+        elif isinstance(feature, CategoricalFeature) or isinstance(feature, BinaryFeature):
+            discretize_categoricals(ts_sample, feature, feature_id)
 
-    return prev_time_feat_vals
+        generate_obs_masks(ts_sample, feature, feature_id)
+
+
+
+    return ts_sample, mask
+
+
+def predict_time_series():
+    pass
 
 
 def generate_instances(args, features):
     """Generate instances"""
-    seq_lengths = None
-    if args.synthesis_type == constants.TABULAR:
-        instances = np.empty((args.num_instances, args.num_features))
-        for sid in range(args.num_instances):
-            instances[sid] = [feature.sample() for feature in features]
-    else:
-        seq_lengths = np.random.geometric(p=(1/args.expected_seq_length), size=args.num_instances*100)
-        seq_lengths = seq_lengths[np.where(seq_lengths > args.min_seq_length)][:args.num_instances]
-        assert seq_lengths.shape[0] == args.num_instances, f"Failure! Not enough instances of sequence length {args.min_seq_length} generated! Please retry."
-        max_len = np.max(seq_lengths).item()
-        instances = []
-        for instance_id in range(args.num_instances):
-            burn_in_time = 0
-            if args.use_burn_in:
-                burn_in_time = max([int(x) for x in args.interact_window_range.split(",")])
-            cur_seq_len = seq_lengths[instance_id] + burn_in_time
+    seq_lengths = np.random.geometric(p=(1/args.expected_seq_length), size=args.num_instances)
+    seq_lengths += args.min_seq_length-1
+    max_len = np.max(seq_lengths).item()
+    burn_in_time = -min(args.interactions_range)
+    generate_length = max_len + burn_in_time
 
-            if args.max_feature_interactions == 0:
-                instance = np.array([feature.sample(cur_seq_len) for feature in features])
-            else:
-                instance = sample_with_dependency(args, features, cur_seq_len)
-            instance = instance[:,burn_in_time:]
-            instance = np.pad(instance, pad_width=((0,0),(0,max_len-instance.shape[-1])), constant_values=np.nan)
-            instances.append(instance)
-    return np.stack(instances), seq_lengths
+    instances = []
+    masks = []
+    for instance_id in range(args.num_instances):
+        instance, mask = sample_time_series(args, features, generate_length)
+        instances.append(instance)
+
+        masks.append(mask)
+    return np.stack(instances), mask
 
 
 def generate_labels(model, instances):

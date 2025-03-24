@@ -57,15 +57,6 @@ class Aggregator():
         return matrix
 
 
-class TabularAggregator(Aggregator):
-    """Returns input as-is without aggregation (for tabular features)"""
-    def __init__(self):
-        super().__init__(None, None)
-
-    def operate(self, sequences):
-        return sequences
-
-
 class AggregationFunction(ABC):
     """Aggregation function base class"""
     NONLINEARITY_OPERATORS = [lambda x: x, np.abs, np.square]
