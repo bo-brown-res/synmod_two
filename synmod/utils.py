@@ -63,12 +63,16 @@ def argstr_to_list(value, name, args):
 
 def discretize_categoricals(ts_sample, feature, feature_id):
     f_vals = ts_sample[feature_id]
+    thresholds = feature.generator._out_window_state.threshold
     for time_point, val in enumerate(f_vals):
-        which_lower = np.argwhere(feature.threshold <= val).max()
-        # which_higher = np.argwhere(self.threshold > val).min()
-        return which_lower
+        which_lower = np.argwhere(thresholds <= val).max()
+        ts_sample[feature_id, time_point] = which_lower
+    return ts_sample
 
 
-
-def generate_obs_masks(ts_sample, feature, feature_id):
-   pass
+def generate_obs_masks(ts_sample, feature, feature_id, seq_length):
+   f_vals = ts_sample[feature_id]
+   observation_prob = feature.generator._out_window_state.observation_prob
+   mask = feature.generator._rng.choice([1, 0], size=len(f_vals), p=[observation_prob, 1-observation_prob])
+   mask[:-seq_length] = 0
+   return mask

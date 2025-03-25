@@ -16,7 +16,8 @@ from synmod import constants
 from synmod import features as F
 from synmod import models as M
 from synmod.features import ConstantFeature, CategoricalFeature, BinaryFeature
-from synmod.utils import get_logger, JSONEncoderPlus, strtobool, strtointlist, discretize_categoricals
+from synmod.utils import get_logger, JSONEncoderPlus, strtobool, strtointlist, discretize_categoricals, \
+    generate_obs_masks
 
 
 def synthesize(**kwargs):
@@ -45,7 +46,7 @@ def main(strargs=None):
     common = parser.add_argument_group("Common optional parameters")
     common.add_argument("-fraction_relevant_features", help="Fraction of features relevant to model",
                         type=float, default=1)
-    common.add_argument("-num_interactions", help="number of pairwise in aggregation model (default 0)",
+    common.add_argument("-num_model_interactions", help="number of pairwise in aggregation model (default 0)",
                         type=int, default=0)
     common.add_argument("-include_interaction_only_features", help="include interaction-only features in aggregation model"
                         " in addition to linear + interaction features (excluded by default)", type=strtobool)
@@ -193,9 +194,9 @@ def pipeline(args):
     configure(args)
     args.logger.info(f"Begin generating sequence data with args: {args}")
     features = generate_features(args)
-    instances, masks = generate_instances(args, features)
+    instances, masks, credit_assignment = generate_instances(args, features)
     model = M.get_model(args, features, instances)
-    ground_truth_estimation(args, features, instances, model)
+    gt = ground_truth_estimation(args, features, instances, model, credit_assignment)
     write_outputs(args, features, instances, model)
 
     model_instances = copy.deepcopy(instances)
@@ -253,29 +254,32 @@ def generate_features(args):
     return features
 
 
-def sample_time_series(args, features, generation_length, **kwargs):
+def sample_time_series(args, features, generation_length, seq_length, **kwargs):
     #for each time point, generate a value for each of the features
     ts_sample = np.zeros((len(features), generation_length))
 
+    credit_assignment = []
     for time_point in range(generation_length):
+        fts_ca = []
         for feature_id, feature in enumerate(features):
             # mask = np.random.choice([np.nan, 1], size=cur_seq_len, p=[1 - features[feature_id].observation_probability, features[feature_id].observation_probability])
             val, credit = feature.sample_timepoint(args, time_point, ts_sample, feature_id, **kwargs)
             ts_sample[feature_id, time_point] = val
+            fts_ca.append(credit)
+        credit_assignment.append(fts_ca)
 
     #TODO: discretize categoricals here
     # TODO: generate masks
+    masks = []
     for feature_id, feature in enumerate(features):
         if isinstance(feature, ConstantFeature): #set the constant feature value to be whatever was first sampled
             ts_sample[feature_id, :] = ts_sample[feature_id, 0]
         elif isinstance(feature, CategoricalFeature) or isinstance(feature, BinaryFeature):
-            discretize_categoricals(ts_sample, feature, feature_id)
+            ts_sample = discretize_categoricals(ts_sample, feature, feature_id)
 
-        generate_obs_masks(ts_sample, feature, feature_id)
+        masks.append(generate_obs_masks(ts_sample, feature, feature_id, seq_length))
 
-
-
-    return ts_sample, mask
+    return ts_sample, masks, credit_assignment
 
 
 def predict_time_series():
@@ -292,12 +296,13 @@ def generate_instances(args, features):
 
     instances = []
     masks = []
+    credits = []
     for instance_id in range(args.num_instances):
-        instance, mask = sample_time_series(args, features, generate_length)
+        instance, mask, credit_assignment = sample_time_series(args, features, generate_length, seq_length=seq_lengths[instance_id])
         instances.append(instance)
-
-        masks.append(mask)
-    return np.stack(instances), mask
+        masks.append(np.stack(mask))
+        credits.append(credit_assignment)
+    return np.stack(instances), np.stack(masks), np.array(credits, dtype=object)
 
 
 def generate_labels(model, instances):
@@ -307,19 +312,19 @@ def generate_labels(model, instances):
     return model.predict(instances)
 
 
-def ground_truth_estimation(args, features, instances, model):
+def ground_truth_estimation(args, features, instances, model, credit_assignment):
     """Estimate and tag ground truth importance of features"""
     # pylint: disable = protected-access
     args.logger.info("Begin estimating ground truth effects")
     relevant_features = functools.reduce(set.union, model.relevant_feature_map, set())
-    matrix = model._aggregator.operate(instances)
-    zvec = np.zeros(args.num_features)
+    matrix, credits = model._aggregator.operate(instances)
+    gt_values = np.zeros(args.num_features)
     for idx, feature in enumerate(features):
         if idx not in relevant_features:
             continue
         feature.important = True
         if args.model_type == constants.REGRESSOR:
-            if args.num_interactions > 0:
+            if args.num_model_interactions > 0:
                 args.logger.info("Ground truth importance for interacting features not worked out")
                 feature.effect_size = 1  # TODO: theory worked out only for non-interacting features
             else:
@@ -361,7 +366,7 @@ def write_summary(args, features, model):
                   model_type=model.__class__.__name__,
                   sequences_independent_of_windows=args.window_independent,
                   fraction_relevant_features=args.fraction_relevant_features,
-                  num_interactions=args.num_interactions,
+                  num_model_interactions=args.num_model_interactions,
                   include_interaction_only_features=args.include_interaction_only_features,
                   seed=args.seed)
     # pylint: disable = protected-access

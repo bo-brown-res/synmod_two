@@ -67,7 +67,7 @@ class TemporalFeature(Feature):
         raw_value =  self.generator.sample(sequence_length=1)
         final_value = raw_value.item()
 
-        credit_assignment = [{'fid': feature_id, 'loc': time_point, 'val': raw_value}]
+        credit_assignment = [{'fid': feature_id, 'loc': time_point, 'val': raw_value.item()}]
 
         for interaction in self.interactions:
             if time_point + interaction['w_start'] >= 0: #dont need to acount for partial values on account of burn-in period
@@ -98,50 +98,6 @@ class TemporalFeature(Feature):
         return final_value, credit_assignment
 
 
-        # if cur_state is None:
-        #     cur_state = self._rng.choice(self._out_window_states)  # default state
-        # # value = self._init_value  # TODO: what if value is re-initialized for every sequence sampled? (trends)
-        # left, right = self._window
-        #
-        # if not self._window_independent:
-        #     # Reset initial state in/out of window
-        #     if timepoint >= left:
-        #         cur_state = self._rng.choice(self._in_window_states)
-        #     elif timepoint <= right:
-        #         cur_state = self._rng.choice(self._out_window_states)
-        #
-        # if self._feature_type == NUMERIC:
-        #     old_mean = cur_state.mean  # cur_state.mean
-        #     # Update cur_state parameters based on previous values
-        #     for d in dependencies:
-        #         start = max(0, timepoint + int(d[2]))
-        #         end = max(0, timepoint + int(d[3]))
-        #         mean_update = d[4](d[1] * prev_time_feat_vals[d[0], start:end])
-        #         mean_update = 0 if np.isnan(mean_update) else mean_update
-        #         cur_state.mean += mean_update
-        #
-        # # Update  trending
-        # if self._trends and timepoint >= 1:
-        #     if self._is_trending:
-        #         self._is_trending = False if 1 == np.random.binomial(n=1, p=self._trend_stop_prob) else True
-        #     else:
-        #         self._is_trending = True if 1 == np.random.binomial(n=1, p=self._trend_start_prob) else False
-        #
-        # # Get value
-        # if self._is_trending:
-        #     prev_val = 0 if np.isnan(prev_time_feat_vals[feature_id, timepoint - 1]) else prev_time_feat_vals[
-        #         feature_id, timepoint - 1]
-        #     cur_state.mean = prev_val
-        #     value = cur_state.sample()
-        # else:
-        #     value = cur_state.sample()
-        #
-        # # Set next state
-        # cur_state = cur_state.transition()
-        #
-        # return value, cur_state
-
-
     def get_prediction_window(self, sequence_length):
         """Randomly select a window for the feature where the model should operate in"""
         assert sequence_length is not None  # TODO: handle variable-length sequence case
@@ -170,7 +126,6 @@ class CategoricalFeature(TemporalFeature):
         generator_class = RandomWalk
         kwargs["n_categories"] = kwargs.get("n_states", self._rng.integers(3, 5, endpoint=True))
         self.generator = generator_class(self._rng, CATEGORICAL, self.window, **kwargs)
-
 
 
 class ConstantFeature(TemporalFeature):

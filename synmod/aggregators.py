@@ -30,9 +30,11 @@ class Aggregator():
                 # FIXME: features can pass the variance test earlier but fail it here, since the samples used are different
                 self._stds[fidx] = 1
 
-    def operate_on_feature(self, fidx, sequences):
+    def operate_on_feature(self, fidx, sequences, seq_start):
         """Operate on sequences for given feature"""
-        return (self._aggregation_fns[fidx].operate(sequences) - self._means[fidx]) / self._stds[fidx]  # sequences: instances X timesteps
+        # return (self._aggregation_fns[fidx].operate(sequences) - self._means[fidx]) / self._stds[fidx]  # sequences: instances X timesteps
+        results, credit = self._aggregation_fns[fidx].operate(sequences, seq_start)
+        return results, credit
 
     def operate(self, sequences):
         """Apply feature-wise operations to sequence data"""
@@ -41,25 +43,30 @@ class Aggregator():
         num_instances, num_features, num_timepoints = sequences.shape  # sequences: instances X features X timesteps
         #matrix = np.zeros((num_instances, num_features))
         matrix = np.zeros_like(sequences)
+        credits = np.zeros_like(sequences, dtype=object)
         for fidx in range(num_features):
             (left, right) = self._windows[fidx]
-        #     matrix[:, fidx] = self.operate_on_feature(fidx, sequences[:, fidx, left: right + 1])
-        # return matrix
-
-            # preds = np.zeros_like(instances)
             for time in range(num_timepoints):
                 if time + right >= 0:
-                    w_start = 0
+                    w_start = max(time + left, 0)
                     w_end = max(time + right, 0)
-                    if time + left >= 0 and time + right >= 0:
-                        w_start = max(time + left, 0)
-                    matrix[:, fidx, time] = self.operate_on_feature(fidx, sequences[:, fidx, w_start: w_end + 1])
-        return matrix
+                    # if time + left >= 0 and time + right >= 0:
+                    #     w_start =
+                    res, credit = self.operate_on_feature(fidx, sequences[:, fidx, w_start: w_end + 1], seq_start=w_start)
+                    matrix[:, fidx, time] = res
+                    credits[:, fidx, time] = credit
+        return matrix, credits
+
+
+def apply_weights(seq, *weights):
+    return seq.dot(weights[0])
 
 
 class AggregationFunction(ABC):
     """Aggregation function base class"""
-    NONLINEARITY_OPERATORS = [lambda x: x, np.abs, np.square]
+    #TODO: Restore the values
+    # NONLINEARITY_OPERATORS = [lambda x: x, np.abs, np.square]
+    NONLINEARITY_OPERATORS = [lambda x: x]
 
     def __init__(self, rng, window):
         self._nonlinearity_operator = rng.choice(AggregationFunction.NONLINEARITY_OPERATORS)
@@ -68,27 +75,41 @@ class AggregationFunction(ABC):
         self.ordering_important = False
         self.weights = None
 
-    def operate(self, sequences):
+    # def operate(self, sequences):
+    #     """Operate on sequences for given feature"""
+    #     weights_to_use = self.weights if self.weights is None else self.weights[:sequences.shape[1]]
+    #     return self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+    def operate(self, sequences, seq_start):
         """Operate on sequences for given feature"""
         weights_to_use = self.weights if self.weights is None else self.weights[:sequences.shape[1]]
-        return self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+        val = self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+        credit_locs = np.stack([[seq_start + x for x in range(sequences.shape[-1])] for i in range(len(sequences))])
+        credits = [(credit_locs[i], weights_to_use) for i in range(len(credit_locs))]
 
+        return val, credits
 
 class Max(AggregationFunction):
     """Computes max of inputs"""
     def __init__(self, rng, window):
         super().__init__(rng, window)
         self._sequence_operator = np.max
+    def operate(self, sequences, seq_start):
+        """Operate on sequences for given feature"""
+        weights_to_use = self.weights if self.weights is None else self.weights[:sequences.shape[1]]
+        val = self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+        credit_locs = seq_start + np.apply_along_axis(np.argmax, 1, sequences, weights_to_use) #since max, each credit loc gets 100% of the credit
+        credits = [[(credit_locs[i], 1)] for i in range(len(credit_locs))]
 
+        return val, credits
 
 class Average(AggregationFunction):
     """Computes average of inputs"""
     def __init__(self, rng, window):
         super().__init__(rng, window)
-        self._sequence_operator = np.average
-
-def apply_weights(seq, *weights):
-    return seq.dot(weights[0])
+        # self._sequence_operator = np.average
+        window_size = window[1] - window[0] + 1
+        self._sequence_operator = apply_weights
+        self.weights = np.ones(window_size) / window_size
 
 class MonotonicWeightedAverage(AggregationFunction):
     """Computes weighted average of inputs with monotically increasing weights"""
@@ -98,7 +119,6 @@ class MonotonicWeightedAverage(AggregationFunction):
         self.weights = np.linspace(1, 2, window_size)
         self._sequence_operator = apply_weights#lambda seq: seq.dot(self.weights)
         self.ordering_important = window_size > 1
-
 
 class RandomWeightedAverage(AggregationFunction):
     """Computes weighted average of inputs with random weights"""

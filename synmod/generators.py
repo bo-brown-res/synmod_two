@@ -51,7 +51,8 @@ class RandomWalk(Generator):
             self.sample = None  # Function to sample from state distribution
             if self._chain._feature_type == NUMERIC:
                 self._summary_stats = SummaryStats(None, None)
-            self.variance_scaler = kwargs.get("variance_scaler", 1)
+            self.variance_scaler = kwargs.get("variance_scaler", 1.0)
+            self.observation_prob = kwargs.get("observation_prob", 1.0)
             self.threshold = None
             self.bin_order = None
 
@@ -97,7 +98,6 @@ class RandomWalk(Generator):
         super().__init__(rng, feature_type, window)
 
         self.n_categories = kwargs.get("n_categories", self._rng.integers(3, 5, endpoint=True))
-        self._window_independent = kwargs.get("window_independent", False)  # Sampled state independent of window location
 
         # If trends enabled, sampled values increase/decrease/stay constant according to trends corresponding to each state:
         self._has_trends = self._rng.choice([True, False]) #if self._feature_type == NUMERIC else False
@@ -113,19 +113,14 @@ class RandomWalk(Generator):
         self._out_window_state = self._in_window_state
         self.n_states = 1
 
-        if not self._window_independent:
-            # Create separate chain in/out of window
-            self._out_window_state = self.State(self, 0, OUT_WINDOW, **kwargs)
-            self.n_states = 2
-
-        states = [self._in_window_state] if self._window_independent else [self._in_window_state, self._out_window_state]
+        states = [self._in_window_state]
         for state in states:
             state.gen_distributions()
 
             if feature_type == 'binary' or feature_type == 'categorical':
                 starting_category = state._chain._rng.choice(list(range(self.n_categories)))
 
-                base_threshold = [(3* x * state.base_sd) for x in range(-starting_category, self.n_categories-starting_category-1)]
+                base_threshold = [(3 * (x+0.5) * state.base_sd) for x in range(-starting_category, self.n_categories-starting_category-1)]
                 state.threshold = [state.base_mean + (y ) for y in base_threshold]
                 state.threshold = np.array([-np.inf] + state.threshold + [np.inf])
 
@@ -136,12 +131,6 @@ class RandomWalk(Generator):
 
         sequence = np.empty(sequence_length)
         for timestep in range(sequence_length):
-            if not self._window_independent:
-                # Reset initial state in/out of window
-                if timestep == left:
-                    cur_state = self._in_window_state
-                elif timestep == right + 1:
-                    cur_state = self._out_window_state
             # Get value from state
             value = cur_state.sample()
             sequence[timestep] = value
@@ -173,9 +162,6 @@ class RandomWalk(Generator):
         graph.attr(label=label, labelloc="t")
         clusters = [self._in_window_state]
         clabels = [""]
-        if not self._window_independent:
-            clusters.append(self._out_window_state)
-            clabels = ["In-window states", "Out-of-window states"]
         for cidx, cluster in enumerate(clusters):
             with graph.subgraph(name=f"cluster_{cidx}") as cgraph:
                 cgraph.attr(label=clabels[cidx])
