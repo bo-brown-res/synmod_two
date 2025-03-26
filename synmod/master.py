@@ -196,7 +196,7 @@ def pipeline(args):
     features = generate_features(args)
     instances, masks, credit_assignment = generate_instances(args, features)
     model = M.get_model(args, features, instances)
-    gt = ground_truth_estimation(args, features, instances, model, credit_assignment)
+    gt_predictions, gt_contributions = ground_truth_estimation(args, features, instances, model, credit_assignment)
     write_outputs(args, features, instances, model)
 
     model_instances = copy.deepcopy(instances)
@@ -317,32 +317,53 @@ def ground_truth_estimation(args, features, instances, model, credit_assignment)
     # pylint: disable = protected-access
     args.logger.info("Begin estimating ground truth effects")
     relevant_features = functools.reduce(set.union, model.relevant_feature_map, set())
-    matrix, credits = model._aggregator.operate(instances)
+    # matrix, credits = model._aggregator.operate(instances)
     gt_values = np.zeros(args.num_features)
-    for idx, feature in enumerate(features):
-        if idx not in relevant_features:
-            continue
-        feature.important = True
-        if args.model_type == constants.REGRESSOR:
-            if args.num_model_interactions > 0:
-                args.logger.info("Ground truth importance for interacting features not worked out")
-                feature.effect_size = 1  # TODO: theory worked out only for non-interacting features
+    gt_contribs = np.zeros(args.num_features)
+
+    gt_preds, contribs, realized_values = model.predict(instances)
+
+    #TODO: manually computing the flow of gradients, for some reason. This should all be binned and replaced with an autograd framework, like pytorch. I regret many things now.
+    # relevant_symbols = [x for x in model.sym_polynomial_fn.free_symbols if x.name != 'beta']
+    # for model.sym_polynomial_fn.args:
+    import re
+    polynomial_components = re.split(r'\+|-', str(model.sym_polynomial_fn))
+    per_inst_poly_vals = {}
+    for f_id in model.relevant_feature_names:
+        search_str = f"x_{f_id}"
+        matches = [x.strip() for x in polynomial_components if search_str in x]
+        for m in matches:
+            m_sections = m.split('*')
+            m_sections.pop(m_sections.index(search_str))
+            coef = float(m_sections[0])
+            other_var_val = np.ones(realized_values.shape[1:])
+            if len(m_sections) > 1:
+                other_var_num = int(m_sections[-1][-1])
+                other_var_val = realized_values[other_var_num]
+            if f_id in per_inst_poly_vals:
+                per_inst_poly_vals[f_id] += other_var_val * coef
             else:
-                # Compute effect size: 2 * covar(Y, g(X))
-                fvec = np.copy(zvec)
-                fvec[idx] = 1
-                alpha = model._polynomial_fn(fvec, 1) - model._polynomial_fn(zvec, 1)  # Linear coefficient
-                feature.effect_size = 2 * alpha**2 * np.var(matrix[:, idx])
-        else:
-            args.logger.info("Ground truth importance for classifier not well-defined")
-            feature.effect_size = 1  # Ground truth importance score for classifier not well-defined
-        if args.synthesis_type == constants.TEMPORAL:
-            feature.window_important = True
-            left, right = feature.window
-            # TODO: Confirm these fields are correct when sequences have the same in- and out-distributions
-            feature.window_ordering_important = feature.aggregation_fn.ordering_important
-            feature.ordering_important = (right - left + 1 < args.expected_seq_length) or feature.window_ordering_important
-    args.logger.info("End estimating ground truth effects")
+                per_inst_poly_vals[f_id] = other_var_val * coef
+
+    final_credit = np.zeros_like(instances)
+    for idx_feat, model_contribs in enumerate(contribs):
+        if idx_feat in model.relevant_feature_names:
+            for idx_finstance, finstance in enumerate(model_contribs):
+                for idx_ftime, m_contrib in enumerate(finstance):
+                    for i in range(len(m_contrib[0])):
+                        model_took_from_loc = m_contrib[0][i]
+                        model_ratio_val_for_loc = m_contrib[1][i] / m_contrib[1].sum()
+
+                        assoc_data_credit = credit_assignment[idx_finstance, model_took_from_loc, idx_feat]
+                        for c in assoc_data_credit:
+                            c_fid = c['fid']
+                            c_tp = c['loc']
+                            c_val = c['cal']
+                            val = per_inst_poly_vals[idx_feat] * model_ratio_val_for_loc * c_val
+                            final_credit[:, c_fid, c_tp] = val
+
+
+    return gt_preds, idx_feat
 
 
 def write_outputs(args, features, instances, model):
