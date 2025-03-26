@@ -77,15 +77,21 @@ class Regressor(Model):
         noise: 1D float array, optional, default 0
             Noise term(s) to add to polynomial
         """
+
+        import torch
+        X = torch.tensor(X, requires_grad=True)
         noise = kwargs.get("noise", 0)  # TODO: this is the noise multiplier
         outs, contribs = self._aggregator.operate(X)
-        outs = outs.transpose(1,0,2)
+        outs = outs.transpose(1,0)
         contribs = contribs.transpose(1,0,2)
 
-        results = np.zeros((outs.shape[1], outs.shape[2]))
+        results = []
         for timepoint in range(outs.shape[-1]):
-            results[:, timepoint] = self._polynomial_fn(outs[:,:,timepoint], noise)
-        return results, contribs, outs
+            results.append(self._polynomial_fn(outs[:,:,timepoint], noise))
+        results = torch.stack(results, axis=-1)
+
+        gradients = torch.autograd.grad(results, X, grad_outputs=torch.ones_like(results), retain_graph=True)[0]
+        return results, contribs, outs, gradients
 
 
 def get_model(args, features, instances):

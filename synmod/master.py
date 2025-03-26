@@ -316,54 +316,51 @@ def ground_truth_estimation(args, features, instances, model, credit_assignment)
     """Estimate and tag ground truth importance of features"""
     # pylint: disable = protected-access
     args.logger.info("Begin estimating ground truth effects")
-    relevant_features = functools.reduce(set.union, model.relevant_feature_map, set())
-    # matrix, credits = model._aggregator.operate(instances)
-    gt_values = np.zeros(args.num_features)
-    gt_contribs = np.zeros(args.num_features)
 
-    gt_preds, contribs, realized_values = model.predict(instances)
+    gt_preds, contribs, realized_values, model_contribs = model.predict(instances)
+
 
     #TODO: manually computing the flow of gradients, for some reason. This should all be binned and replaced with an autograd framework, like pytorch. I regret many things now.
     # relevant_symbols = [x for x in model.sym_polynomial_fn.free_symbols if x.name != 'beta']
     # for model.sym_polynomial_fn.args:
-    import re
-    polynomial_components = re.split(r'\+|-', str(model.sym_polynomial_fn))
-    per_inst_poly_vals = {}
-    for f_id in model.relevant_feature_names:
-        search_str = f"x_{f_id}"
-        matches = [x.strip() for x in polynomial_components if search_str in x]
-        for m in matches:
-            m_sections = m.split('*')
-            m_sections.pop(m_sections.index(search_str))
-            coef = float(m_sections[0])
-            other_var_val = np.ones(realized_values.shape[1:])
-            if len(m_sections) > 1:
-                other_var_num = int(m_sections[-1][-1])
-                other_var_val = realized_values[other_var_num]
-            if f_id in per_inst_poly_vals:
-                per_inst_poly_vals[f_id] += other_var_val * coef
-            else:
-                per_inst_poly_vals[f_id] = other_var_val * coef
+    # import re
+    # polynomial_components = re.split(r'\+|-', str(model.sym_polynomial_fn))
+    # per_inst_poly_vals = {}
+    # for f_id in model.relevant_feature_names:
+    #     search_str = f"x_{f_id}"
+    #     matches = [x.strip() for x in polynomial_components if search_str in x]
+    #     for m in matches:
+    #         m_sections = m.split('*')
+    #         m_sections.pop(m_sections.index(search_str))
+    #         coef = float(m_sections[0])
+    #         other_var_val = np.ones(realized_values.shape[1:])
+    #         if len(m_sections) > 1:
+    #             other_var_num = int(m_sections[-1][-1])
+    #             other_var_val = realized_values[other_var_num]
+    #         if f_id in per_inst_poly_vals:
+    #             per_inst_poly_vals[f_id] += other_var_val * coef
+    #         else:
+    #             per_inst_poly_vals[f_id] = other_var_val * coef
+    #
+    # final_credit = np.zeros_like(instances)
+    # for idx_feat, model_contribs in enumerate(contribs):
+    #     if idx_feat in model.relevant_feature_names:
+    #         for idx_finstance, finstance in enumerate(model_contribs):
+    #             for idx_ftime, m_contrib in enumerate(finstance):
+    #                 for i in range(len(m_contrib[0])):
+    #                     model_took_from_loc = m_contrib[0][i]
+    #                     model_ratio_val_for_loc = m_contrib[1][i] / m_contrib[1].sum()
+    #
+    #                     assoc_data_credit = credit_assignment[idx_finstance, model_took_from_loc, idx_feat]
+    #                     for c in assoc_data_credit:
+    #                         c_fid = c['fid']
+    #                         c_tp = c['loc']
+    #                         c_val = c['cal']
+    #                         val = per_inst_poly_vals[idx_feat] * model_ratio_val_for_loc * c_val
+    #                         final_credit[:, c_fid, c_tp] = val
 
-    final_credit = np.zeros_like(instances)
-    for idx_feat, model_contribs in enumerate(contribs):
-        if idx_feat in model.relevant_feature_names:
-            for idx_finstance, finstance in enumerate(model_contribs):
-                for idx_ftime, m_contrib in enumerate(finstance):
-                    for i in range(len(m_contrib[0])):
-                        model_took_from_loc = m_contrib[0][i]
-                        model_ratio_val_for_loc = m_contrib[1][i] / m_contrib[1].sum()
 
-                        assoc_data_credit = credit_assignment[idx_finstance, model_took_from_loc, idx_feat]
-                        for c in assoc_data_credit:
-                            c_fid = c['fid']
-                            c_tp = c['loc']
-                            c_val = c['cal']
-                            val = per_inst_poly_vals[idx_feat] * model_ratio_val_for_loc * c_val
-                            final_credit[:, c_fid, c_tp] = val
-
-
-    return gt_preds, idx_feat
+    return gt_preds, gt_contribs
 
 
 def write_outputs(args, features, instances, model):

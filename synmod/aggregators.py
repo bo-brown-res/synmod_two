@@ -3,6 +3,7 @@
 from abc import ABC
 
 import numpy as np
+import torch
 
 
 class Aggregator():
@@ -42,8 +43,8 @@ class Aggregator():
         # But this seems unavoidable under the current design (analysis only calls model.predict, doesn't provide other info)
         num_instances, num_features, num_timepoints = sequences.shape  # sequences: instances X features X timesteps
         #matrix = np.zeros((num_instances, num_features))
-        matrix = np.zeros_like(sequences)
-        credits = np.zeros_like(sequences, dtype=object)
+        matrix = torch.zeros_like(sequences)
+        credits = np.zeros_like(sequences.detach(), dtype=object)
         for fidx in range(num_features):
             (left, right) = self._windows[fidx]
             for time in range(num_timepoints):
@@ -82,7 +83,8 @@ class AggregationFunction(ABC):
     def operate(self, sequences, seq_start):
         """Operate on sequences for given feature"""
         weights_to_use = self.weights if self.weights is None else self.weights[:sequences.shape[1]]
-        val = self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+        # val = self._nonlinearity_operator(torch.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+        val = (sequences * torch.tensor(weights_to_use)).sum(axis=-1)
         credit_locs = np.stack([[seq_start + x for x in range(sequences.shape[-1])] for i in range(len(sequences))])
         credits = [(credit_locs[i], weights_to_use) for i in range(len(credit_locs))]
 
@@ -97,6 +99,7 @@ class Max(AggregationFunction):
         """Operate on sequences for given feature"""
         weights_to_use = self.weights if self.weights is None else self.weights[:sequences.shape[1]]
         val = self._nonlinearity_operator(np.apply_along_axis(self._sequence_operator, 1, sequences, weights_to_use))  # sequences: instances X timesteps
+
         credit_locs = seq_start + np.apply_along_axis(np.argmax, 1, sequences, weights_to_use) #since max, each credit loc gets 100% of the credit
         credits = [[(credit_locs[i], 1)] for i in range(len(credit_locs))]
 
@@ -131,7 +134,8 @@ class RandomWeightedAverage(AggregationFunction):
         self.ordering_important = window_size > 1
 
 
-AGGREGATION_OPERATORS = [Max, Average, MonotonicWeightedAverage, RandomWeightedAverage]
+# AGGREGATION_OPERATORS = [Max, Average, MonotonicWeightedAverage, RandomWeightedAverage]
+AGGREGATION_OPERATORS = [Average, MonotonicWeightedAverage, RandomWeightedAverage]
 
 
 def get_aggregation_fn_cls(rng):
