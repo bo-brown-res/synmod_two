@@ -126,7 +126,7 @@ class RandomWalk(Generator):
     def sample(self, sequence_length, **kwargs):
         cur_state = self._out_window_state  # initial state
         # value = self._init_value  # TODO: what if value is re-initialized for every sequence sampled? (trends)
-        left, right = self._window
+        # left, right = self._window
 
         sequence = np.empty(sequence_length)
         for timestep in range(sequence_length):
@@ -151,8 +151,6 @@ class RandomWalk(Generator):
             #Update the RNG mean
             if self._mean_becomes_sampled:
                 cur_state.active_mean = value
-
-
 
         return sequence
 

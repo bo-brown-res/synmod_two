@@ -69,6 +69,12 @@ def main(strargs=None):
     temporal.add_argument("-standardize_features", help="add feature standardization (0 mean, 1 SD) to model",
                           type=strtobool)
 
+    #Variable distribution parameters
+    temporal.add_argument("-variance_scaling",
+                          help="Scaler applied to the variance of the gaussian from which values are sampled. Either a float applied to all values, or a list of values (one per feature)",
+                          type=str,
+                          default="1") #TODO: Fix
+
     #Observation parameters
     temporal.add_argument("-observation_prob", help="The probability of observing a given feature value at any time point. Can be "
                                                            "either a single probability applied to all features (i.e. '0.1') or a "
@@ -79,19 +85,17 @@ def main(strargs=None):
     #Interaction parameters
     temporal.add_argument("-interactions_max", help="Maximum number of other features any one feature can interact with",
                           type=int, default=0) #TODO: Fix
-    temporal.add_argument("-interactions_probability", help="The probability of one feature having an interaction with any other feature.",
+    temporal.add_argument("-interact_prob", help="The probability of one feature having an interaction with any other feature.",
                           type=float) #TODO: Fix
-    temporal.add_argument("-interactions_range",
-                          help="Defines the indices relative to the current time point from which the dependency window start point can be sampled. Defaults to '-5,1', ",
+    temporal.add_argument("-interact_range",
+                          help="The window of time points (inclusive) relative to the current time point from which the dependency window can be sampled. Defaults to '-5,-1'.",
                           type=strtointlist, default='-5,-1') #TODO: Fix
-    temporal.add_argument("-interactions_len",
-                          help="The size of the interaction window (how many of the previous time points for feature A can influence the value of feature B)",
-                          type=int) #TODO: Fix
-    temporal.add_argument("-interaction_scale",
+    temporal.add_argument("-interact_scaling",
                           help="Specifies a maximum for the strength of dependencies.",
                           type=float,
                           default=0.1) #TODO: Fix
 
+    #Sequence length sampling paramteres
     temporal.add_argument("-expected_seq_length", help="Expected length of a sequence, sampled from a geometric distribution",
                           type=int) #TODO: Fix
     temporal.add_argument("-min_seq_len",
@@ -99,10 +103,7 @@ def main(strargs=None):
                           type=int,
                           default=1) #TODO: Fix
 
-    temporal.add_argument("-variance_scaling",
-                          help="Scaler applied to the variance of the gaussian from which values are sampled. Either a float applied to all values, or a list of values (one per feature)",
-                          type=str,
-                          default="1") #TODO: Fix
+    #Trend parameters
     temporal.add_argument("-trend_start_prob",
                           help="Probability that an inactive trend will start at any given time point in a trend-enabled variable.",
                           type=float,
@@ -194,11 +195,24 @@ def pipeline(args):
     """Pipeline"""
     configure(args)
     args.logger.info(f"Begin generating sequence data with args: {args}")
+
+    #Initialize the features
     features = generate_features(args)
+
+    #Assign feature-feature interactions
+    assign_feature_interactions(args, features)
+
+    #Generate instance data
     instances, masks = generate_instances(args, features)
+
+    #Construct the ground-truth model
     model = M.get_model(args, features, instances)
+
+    #Generate labels and get the input-data contributions to the label generation
     gt_predictions, gt_contributors = ground_truth_estimation(args, features, instances, model)
-    write_outputs(args, features, instances, model)
+
+    #Save the model, features, contributions and generated data
+    write_outputs(args, features, instances, model, gt_predictions, gt_contributors)
 
     model_instances = copy.deepcopy(instances)
     model_instances = np.nan_to_num(model_instances, 0)
@@ -208,19 +222,21 @@ def pipeline(args):
     return features, instances, model, gt_predictions, gt_contributors
 
 
-def assign_interfeature_dependencies(args, features):
+def assign_feature_interactions(args, features):
+    #Determine which features interact (assigned random value must be within probability threshold)
     interaction_matrix = np.random.random([len(features), len(features)])
     np.fill_diagonal(interaction_matrix, 999, wrap=False) #make sure the diagonal is always greater than interaction probability so no feature can have an interaction with itself
-    interaction_range = args.interactions_range
-    window_possible_start, window_possible_end = min(interaction_range), max(interaction_range)
+
+    for x in args.interact_range:
+        assert x<0, f"The argument 'interact_range' with value {args.interact_range} should consist of only None or a tuple of negative numbers, i.e. '-5,-1'."
+
+    window_possible_start, window_possible_end = min(args.interact_range), max(args.interact_range)
     window_possible = list(range(window_possible_start, (window_possible_end + 1)))
 
-    for x in interaction_range:
-        assert x<0, f"The argument 'interaction_range' with value {interaction_range} should consist of only 0 or negative numbers, i.e. -5,-1."
 
     for fid, feature in enumerate(features):
         f_rand_gen = feature.generator._rng
-        interactions_locs = np.argwhere(interaction_matrix[fid] <= args.interactions_probability)
+        interactions_locs = np.argwhere(interaction_matrix[fid] <= args.interact_prob)
         if len(interactions_locs) > args.interactions_max:
             interactions_locs = f_rand_gen.choice(interactions_locs, args.interactions_max)
 
@@ -228,12 +244,12 @@ def assign_interfeature_dependencies(args, features):
         for int_loc in interactions_locs:
             # the important window should be relative to the end of sequence - i.e. relative to discharge or mortality for IHM prediction
 
-            interaction_scale = f_rand_gen.uniform(-args.interaction_scale, args.interaction_scale)
+            interact_scaling = f_rand_gen.uniform(-args.interact_scaling, args.interact_scaling)
             window_start = f_rand_gen.choice(window_possible, size=1)[0]
             window_end = min(-1, window_start + args.interactions_len)
             window_aggregation_fn_idx = f_rand_gen.choice([0,1,2])
             window_aggregation_function = ['mean', 'min', 'max'][window_aggregation_fn_idx]
-            interactions.append({'inter_fid':int_loc, 'inter_scale':interaction_scale, 'w_start':window_start, 'w_end':window_end, 'w_fn':window_aggregation_function})
+            interactions.append({'inter_fid':int_loc, 'inter_scale':interact_scaling, 'w_start':window_start, 'w_end':window_end, 'w_fn':window_aggregation_function})
 
         feature.interactions = interactions
 
@@ -250,7 +266,7 @@ def generate_features(args):
         fid += 1
 
     if args.interactions_max > 0:
-        assign_interfeature_dependencies(args, features)
+        assign_feature_interactions(args, features)
 
     return features
 
@@ -285,21 +301,20 @@ def predict_time_series():
 
 def generate_instances(args, features):
     """Generate instances"""
-    #Sample the sequence lengths
-    seq_lengths = np.zeros(args.num_instances)
+    #Sample the sequence lengths and ensure that all sequences at least as long as the minimum length
+    seq_lengths = np.zeros(args.num_instances, dtype=int)
 
-    #Ensure that all sequences at least as long as the minimum length
-    under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
+    #Account for burn-in time
+    actual_min_length = max(args.min_seq_len, -min(args.interact_range))
+
+    under_min_locs = np.argwhere(seq_lengths < actual_min_length).flatten()
     while len(under_min_locs) > 0:
         seq_lengths[under_min_locs] = np.random.geometric(p=(1/args.expected_seq_length), size=len(under_min_locs))
-        under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
-    # seq_lengths += args.min_seq_len-1
+        under_min_locs = np.argwhere(seq_lengths < actual_min_length).flatten()
 
-    max_len = np.max(seq_lengths).item()
-
-    #Add time points to cover the born in period
-    burn_in_time = -min(args.interactions_range)
-    generate_length = max_len + burn_in_time
+    #Since it's faster to generate a matrix than a list of variable-length vectors, we use the max length as the
+    # generation length for all instances, then truncate the matrix rows into variable-length vectors later
+    generate_length = int(np.max(seq_lengths).item())
 
     instances = []
     masks = []
