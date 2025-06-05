@@ -51,7 +51,7 @@ class RandomWalk(Generator):
             self.sample = None  # Function to sample from state distribution
             if self._chain._feature_type == NUMERIC:
                 self._summary_stats = SummaryStats(None, None)
-            self.variance_scaler = kwargs.get("variance_scaler", 1.0)
+            self.variance_scaling = kwargs.get("variance_scaling", 1.0)
             self.observation_prob = kwargs.get("observation_prob", 1.0)
             self.threshold = None
             self.bin_order = None
@@ -75,7 +75,7 @@ class RandomWalk(Generator):
             self._state_object = self._chain._in_window_state if self._state_type == IN_WINDOW else self._chain._out_window_state
 
             mean = rng.uniform(-1, 1)
-            sd = (rng.uniform(0.1) * 0.05) * self.variance_scaler
+            sd = (rng.uniform(0.1) * 0.05) * self.variance_scaling
             self.base_mean = mean
             self.active_mean = mean
             self.base_sd = sd
@@ -101,12 +101,11 @@ class RandomWalk(Generator):
 
         # If trends enabled, sampled values increase/decrease/stay constant according to trends corresponding to each state:
         self._has_trends = self._rng.choice([True, False]) #if self._feature_type == NUMERIC else False
-        self._init_value = self._rng.uniform(-1, 1)  # Initial value of Random Walk, used for trends
-        self._trend_start_prob = np.random.uniform(0,kwargs['trend_start_scaler'])
-        self._trend_stop_prob = np.random.uniform(0,kwargs['trend_stop_scaler'])
-        self._trend_strength = np.random.uniform(0, 0.2)
+        self._trend_start_prob = self._rng.uniform(0,kwargs['trend_start_prob'])
+        self._trend_stop_prob = self._rng.uniform(0,kwargs['trend_stop_prob'])
+        self._trend_strength = self._rng.uniform(-kwargs['trend_strength'], kwargs['trend_strength'])
         self._is_trending = False
-        self._is_markov = False #TODO: Make this an option
+        self._mean_becomes_sampled = True #TODO: Make this an option
 
         # Select states inside and outside window
         self._in_window_state = self.State(self, 0, IN_WINDOW, **kwargs)
@@ -134,18 +133,23 @@ class RandomWalk(Generator):
             # Get value from state
             value = cur_state.sample()
             sequence[timestep] = value
+
             # Set next state
             cur_state = cur_state.transition()
 
+            #Determine if a trend is starting or stopping
             if self._is_trending:
                 self._is_trending = self._rng.choice([True, False], p=[1-self._trend_stop_prob, self._trend_stop_prob])
             else:
                 self._is_trending = self._rng.choice([True, False], p=[self._trend_start_prob, 1 - self._trend_start_prob])
 
+            #Update the value if we are trending
             if self._is_trending:
-                cur_state.active_mean = cur_state.active_mean + (self._trend_strength * value)
+                value = value + (self._trend_strength * self._rng.uniform(0,1))
                 # cur_state.active_mean = cur_state.active_mean + (self._trend_strength * (value - cur_state.base_mean))
-            if not self._is_markov:
+
+            #Update the RNG mean
+            if self._mean_becomes_sampled:
                 cur_state.active_mean = value
 
 
@@ -156,7 +160,7 @@ class RandomWalk(Generator):
         graph = graphviz.Digraph()
         label = f"Random Walk \nFeature type: {self._feature_type}"
         if self._has_trends:
-            label += f"\nTrends: True\nInitial value: {self._init_value:1.5f}"
+            pass #TODO
         left, right = self._window
         label += f"\nWindow: [{left}, {right}]\n\n"
         graph.attr(label=label, labelloc="t")
@@ -180,7 +184,7 @@ class RandomWalk(Generator):
         if self._feature_type == NUMERIC:
             summary["trends"] = self._has_trends
             if self._has_trends:
-                summary["init_value"] = self._init_value
+                pass #TODO
         for stype, states in {"out_window_states": self._out_window_state, "in_window_states": self._in_window_state}.items():
             states_summary = [None] * len(states)
             for idx, state in enumerate(states):

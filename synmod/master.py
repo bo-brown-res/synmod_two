@@ -92,28 +92,29 @@ def main(strargs=None):
                           type=float,
                           default=0.1) #TODO: Fix
 
-    temporal.add_argument("-expected_seq_length", help="Expected length of a sequence, sampled from a geometric dsitribution",
+    temporal.add_argument("-expected_seq_length", help="Expected length of a sequence, sampled from a geometric distribution",
                           type=int) #TODO: Fix
-    temporal.add_argument("-min_seq_length",
-                          help="Scaling factor for how much more likely a categorical variable is to keep its value over time point",
-                          type=int, default=1) #TODO: Fix
+    temporal.add_argument("-min_seq_len",
+                          help="The minimum sequence length of any sampled sequence.",
+                          type=int,
+                          default=1) #TODO: Fix
 
-    temporal.add_argument("-variance_scaler",
+    temporal.add_argument("-variance_scaling",
                           help="Scaler applied to the variance of the gaussian from which values are sampled. Either a float applied to all values, or a list of values (one per feature)",
                           type=str,
                           default="1") #TODO: Fix
-    temporal.add_argument("-trend_start_scaler",
-                          help="Scaling factor for how likely a trend is to start in a trend-enabled variable at any given time point.",
+    temporal.add_argument("-trend_start_prob",
+                          help="Probability that an inactive trend will start at any given time point in a trend-enabled variable.",
                           type=float,
                           default=0.1) #TODO: Fix
-    temporal.add_argument("-trend_stop_scaler",
-                          help="Scaling factor for how likely a trend is to stop in a trend-enabled variable that has started trending.",
+    temporal.add_argument("-trend_stop_prob",
+                          help="Probability that an active trend will stop at any given time point in a trend-enabled variable.",
                           type=float,
                           default=0.1) #TODO: Fix
-    # temporal.add_argument("-use_burn_in",
-    #                       help="Choice of using burn in period or not - with burn in period, all values are generated with the same linear gaussian. Without burn in, values at the start of the seqeunce come from linear gaussians that do not have access to some previous (not yet generated) dependency values.",
-    #                       type=bool,
-    #                       default=True)
+    temporal.add_argument("-trend_strength",
+                          help="Scaling factor for the .",
+                          type=float,
+                          default=0.1) #TODO: Fix
 
     args = parser.parse_args(args=strargs)
     if args.synthesis_type == constants.TEMPORAL:
@@ -194,17 +195,17 @@ def pipeline(args):
     configure(args)
     args.logger.info(f"Begin generating sequence data with args: {args}")
     features = generate_features(args)
-    instances, masks, credit_assignment = generate_instances(args, features)
+    instances, masks = generate_instances(args, features)
     model = M.get_model(args, features, instances)
-    gt_predictions, gt_importances = ground_truth_estimation(args, features, instances, model, credit_assignment)
+    gt_predictions, gt_contributors = ground_truth_estimation(args, features, instances, model)
     write_outputs(args, features, instances, model)
 
-    # model_instances = copy.deepcopy(instances)
-    # model_instances = np.nan_to_num(model_instances, 0)
-    # test_results = model.predict(model_instances)
+    model_instances = copy.deepcopy(instances)
+    model_instances = np.nan_to_num(model_instances, 0)
+    test_results = model.predict(model_instances)
     draw_visualize(features, instances, test_results, item_id=0, seq_lengths=seq_lengths)
 
-    return features, instances, model, gt_predictions, gt_importances
+    return features, instances, model, gt_predictions, gt_contributors
 
 
 def assign_interfeature_dependencies(args, features):
@@ -258,15 +259,11 @@ def sample_time_series(args, features, generation_length, seq_length, **kwargs):
     #for each time point, generate a value for each of the features
     ts_sample = np.zeros((len(features), generation_length))
 
-    credit_assignment = []
     for time_point in range(generation_length):
-        fts_ca = []
         for feature_id, feature in enumerate(features):
             # mask = np.random.choice([np.nan, 1], size=cur_seq_len, p=[1 - features[feature_id].observation_probability, features[feature_id].observation_probability])
-            val, credit = feature.sample_timepoint(args, time_point, ts_sample, feature_id, **kwargs)
+            val = feature.sample_timepoint(args, time_point, ts_sample, feature_id, **kwargs)
             ts_sample[feature_id, time_point] = val
-            fts_ca.append(credit)
-        credit_assignment.append(fts_ca)
 
     #TODO: discretize categoricals here
     # TODO: generate masks
@@ -279,7 +276,7 @@ def sample_time_series(args, features, generation_length, seq_length, **kwargs):
 
         masks.append(generate_obs_masks(ts_sample, feature, feature_id, seq_length))
 
-    return ts_sample, masks, credit_assignment
+    return ts_sample, masks
 
 
 def predict_time_series():
@@ -288,21 +285,29 @@ def predict_time_series():
 
 def generate_instances(args, features):
     """Generate instances"""
-    seq_lengths = np.random.geometric(p=(1/args.expected_seq_length), size=args.num_instances)
-    seq_lengths += args.min_seq_length-1
+    #Sample the sequence lengths
+    seq_lengths = np.zeros(args.num_instances)
+
+    #Ensure that all sequences at least as long as the minimum length
+    under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
+    while len(under_min_locs) > 0:
+        seq_lengths[under_min_locs] = np.random.geometric(p=(1/args.expected_seq_length), size=len(under_min_locs))
+        under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
+    # seq_lengths += args.min_seq_len-1
+
     max_len = np.max(seq_lengths).item()
+
+    #Add time points to cover the born in period
     burn_in_time = -min(args.interactions_range)
     generate_length = max_len + burn_in_time
 
     instances = []
     masks = []
-    credits = []
     for instance_id in range(args.num_instances):
-        instance, mask, credit_assignment = sample_time_series(args, features, generate_length, seq_length=seq_lengths[instance_id])
+        instance, mask = sample_time_series(args, features, generate_length, seq_length=seq_lengths[instance_id])
         instances.append(instance)
         masks.append(np.stack(mask))
-        credits.append(credit_assignment)
-    return np.stack(instances), np.stack(masks), np.array(credits, dtype=object)
+    return np.stack(instances), np.stack(masks)
 
 
 def generate_labels(model, instances):
@@ -312,7 +317,7 @@ def generate_labels(model, instances):
     return model.predict(instances)
 
 
-def ground_truth_estimation(args, features, instances, model, data_credit):
+def ground_truth_estimation(args, features, instances, model):
     """Estimate and tag ground truth importance of features"""
     # pylint: disable = protected-access
     args.logger.info("Begin estimating ground truth effects")

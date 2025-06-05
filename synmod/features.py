@@ -67,10 +67,10 @@ class TemporalFeature(Feature):
         raw_value =  self.generator.sample(sequence_length=1)
         final_value = raw_value.item()
 
-        credit_assignment = [{'fid': feature_id, 'loc': time_point, 'val': raw_value.item()}]
-
         for interaction in self.interactions:
-            if time_point + interaction['w_start'] >= 0: #dont need to acount for partial values on account of burn-in period
+            # We ignore values that are outside of the measured time series on account of burn-in period
+            if time_point + interaction['w_start'] >= 0:
+
                 inter_fid = interaction['inter_fid'].item()
                 inter_subsample = ts_sample[inter_fid, time_point + interaction['w_start']:time_point + interaction['w_end'] + 1].flatten()
 
@@ -78,24 +78,18 @@ class TemporalFeature(Feature):
                     for i, x in enumerate(inter_subsample):
                         contribution = (x * interaction['inter_scale']) / len(inter_subsample)
                         final_value += contribution
-                        contrib_dict= {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + i, 'val':contribution}
-                        credit_assignment.append(contrib_dict)
                 elif interaction['w_fn'] == 'min':
                     min_loc = np.argmin(inter_subsample)
                     contribution = (inter_subsample[min_loc] * interaction['inter_scale'])
                     final_value += contribution
-                    contrib_dict = {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + min_loc, 'val': contribution}
-                    credit_assignment.append(contrib_dict)
                 elif interaction['w_fn'] == 'max':
                     max_loc = np.argmax(inter_subsample)
                     contribution = (inter_subsample[max_loc] * interaction['inter_scale'])
                     final_value += contribution
-                    contrib_dict = {'fid': inter_fid, 'loc': time_point + interaction['w_start'] + max_loc, 'val': contribution}
-                    credit_assignment.append(contrib_dict)
                 else:
                     raise NotImplementedError()
 
-        return final_value, credit_assignment
+        return final_value
 
 
     def get_prediction_window(self, sequence_length):
@@ -156,9 +150,10 @@ def get_feature(args, fid):
     aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
 
     kwargs = {"window_independent": args.window_independent}
-    kwargs['trend_start_scaler'] = args.trend_start_scaler
-    kwargs['trend_stop_scaler'] = args.trend_stop_scaler
-    kwargs['variance_scaler'] = argstr_to_list(args.variance_scaler, 'variance_scaler', args)[fid]
+    kwargs['trend_start_prob'] = args.trend_start_prob
+    kwargs['trend_stop_prob'] = args.trend_stop_prob
+    kwargs['trend_strength'] = args.trend_strength
+    kwargs['variance_scaling'] = argstr_to_list(args.variance_scaling, 'variance_scaling', args)[fid]
     kwargs['observation_prob'] = argstr_to_list(args.observation_prob, 'observation_prob', args)[fid]
 
     feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
