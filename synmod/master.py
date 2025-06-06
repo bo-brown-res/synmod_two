@@ -15,7 +15,7 @@ import numpy as np
 from synmod import constants
 from synmod import features as F
 from synmod import models as M
-from synmod.features import ConstantFeature, CategoricalFeature, BinaryFeature
+from synmod.features import ConstantFeature, CategoricalFeature, BinaryFeature, FeatureFeatureInteraction
 from synmod.utils import get_logger, JSONEncoderPlus, strtobool, strtointlist, discretize_categoricals, \
     generate_obs_masks
 
@@ -203,7 +203,7 @@ def pipeline(args):
     assign_feature_interactions(args, features)
 
     #Generate instance data
-    instances, masks = generate_instances(args, features)
+    instances, masks, seq_lengths = generate_instances(args, features)
 
     #Construct the ground-truth model
     model = M.get_model(args, features, instances)
@@ -224,34 +224,26 @@ def pipeline(args):
 
 def assign_feature_interactions(args, features):
     #Determine which features interact (assigned random value must be within probability threshold)
-    interaction_matrix = np.random.random([len(features), len(features)])
+    interaction_matrix = np.random.uniform(size=[len(features), len(features)])
     np.fill_diagonal(interaction_matrix, 999, wrap=False) #make sure the diagonal is always greater than interaction probability so no feature can have an interaction with itself
 
     for x in args.interact_range:
         assert x<0, f"The argument 'interact_range' with value {args.interact_range} should consist of only None or a tuple of negative numbers, i.e. '-5,-1'."
 
-    window_possible_start, window_possible_end = min(args.interact_range), max(args.interact_range)
-    window_possible = list(range(window_possible_start, (window_possible_end + 1)))
+    if args.interact_prob is not None:
+        for fid, feature in enumerate(features):
+            f_rand_gen = feature.generator._rng
+            interactions_locs = np.argwhere(interaction_matrix[fid] <= args.interact_prob)
+            if len(interactions_locs) > args.interactions_max:
+                interactions_locs = f_rand_gen.choice(interactions_locs, args.interactions_max)
 
-
-    for fid, feature in enumerate(features):
-        f_rand_gen = feature.generator._rng
-        interactions_locs = np.argwhere(interaction_matrix[fid] <= args.interact_prob)
-        if len(interactions_locs) > args.interactions_max:
-            interactions_locs = f_rand_gen.choice(interactions_locs, args.interactions_max)
-
-        interactions = []
-        for int_loc in interactions_locs:
-            # the important window should be relative to the end of sequence - i.e. relative to discharge or mortality for IHM prediction
-
-            interact_scaling = f_rand_gen.uniform(-args.interact_scaling, args.interact_scaling)
-            window_start = f_rand_gen.choice(window_possible, size=1)[0]
-            window_end = min(-1, window_start + args.interactions_len)
-            window_aggregation_fn_idx = f_rand_gen.choice([0,1,2])
-            window_aggregation_function = ['mean', 'min', 'max'][window_aggregation_fn_idx]
-            interactions.append({'inter_fid':int_loc, 'inter_scale':interact_scaling, 'w_start':window_start, 'w_end':window_end, 'w_fn':window_aggregation_function})
-
-        feature.interactions = interactions
+            interactions_locs = np.unique(interactions_locs)
+            interactions = []
+            for int_loc in interactions_locs:
+                # the important window should be relative to the end of sequence - i.e. relative to discharge or mortality for IHM prediction
+                ff_interaction = FeatureFeatureInteraction(args, causal_feature=features[int_loc], affected_feature=feature)
+                interactions.append(ff_interaction)
+            feature.interactions = interactions
 
 
 def generate_features(args):
@@ -264,6 +256,9 @@ def generate_features(args):
 
         features[fid] = feature
         fid += 1
+
+    for assigned_fid in range(args.num_features):
+        features[assigned_fid].fid = assigned_fid
 
     if args.interactions_max > 0:
         assign_feature_interactions(args, features)
@@ -305,16 +300,16 @@ def generate_instances(args, features):
     seq_lengths = np.zeros(args.num_instances, dtype=int)
 
     #Account for burn-in time
-    actual_min_length = max(args.min_seq_len, -min(args.interact_range))
 
-    under_min_locs = np.argwhere(seq_lengths < actual_min_length).flatten()
+    under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
     while len(under_min_locs) > 0:
         seq_lengths[under_min_locs] = np.random.geometric(p=(1/args.expected_seq_length), size=len(under_min_locs))
-        under_min_locs = np.argwhere(seq_lengths < actual_min_length).flatten()
+        under_min_locs = np.argwhere(seq_lengths < args.min_seq_len).flatten()
 
     #Since it's faster to generate a matrix than a list of variable-length vectors, we use the max length as the
     # generation length for all instances, then truncate the matrix rows into variable-length vectors later
-    generate_length = int(np.max(seq_lengths).item())
+    max_seq_len = int(np.max(seq_lengths).item())
+    generate_length = max_seq_len + (-min(args.interact_range) + 1) #adding burn in period as max interaction distance+1
 
     instances = []
     masks = []
@@ -322,7 +317,7 @@ def generate_instances(args, features):
         instance, mask = sample_time_series(args, features, generate_length, seq_length=seq_lengths[instance_id])
         instances.append(instance)
         masks.append(np.stack(mask))
-    return np.stack(instances), np.stack(masks)
+    return np.stack(instances), np.stack(masks), seq_lengths
 
 
 def generate_labels(model, instances):
@@ -341,15 +336,14 @@ def ground_truth_estimation(args, features, instances, model):
 
     ground_truth_importance = np.zeros_like(model_contribs)
 
-    for i_instance, instance in enumerate(data_credit):
-        for i_time, time_values in enumerate(instance):
-            for i_feat, data_contribs_to_feat_time in enumerate(time_values):
-                model_val = model_contribs[i_instance, i_feat, i_time]
-                for xx in range(len(data_contribs_to_feat_time)):
-                    data_took_from_f = data_contribs_to_feat_time[xx]['fid']
-                    data_took_from_l = data_contribs_to_feat_time[xx]['loc']
-                    data_val_for_loc = data_contribs_to_feat_time[xx]['val']
-                    ground_truth_importance[i_instance, data_took_from_f, data_took_from_l] += model_val * data_val_for_loc
+    for i_time, time_values in enumerate(instance):
+        for i_feat, data_contribs_to_feat_time in enumerate(time_values):
+            model_val = model_contribs[i_instance, i_feat, i_time]
+            for xx in range(len(data_contribs_to_feat_time)):
+                data_took_from_f = data_contribs_to_feat_time[xx]['fid']
+                data_took_from_l = data_contribs_to_feat_time[xx]['loc']
+                data_val_for_loc = data_contribs_to_feat_time[xx]['val']
+                ground_truth_importance[i_instance, data_took_from_f, data_took_from_l] += model_val * data_val_for_loc
 
     #normalize importances by instance using min-max scaling
     for loc, inst in enumerate(ground_truth_importance):

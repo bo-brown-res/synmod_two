@@ -9,6 +9,25 @@ from synmod.generators import RandomWalk
 from synmod.aggregators import Max, get_aggregation_fn_cls
 from synmod.utils import argstr_to_list
 
+class FeatureFeatureInteraction:
+    def __init__(self, args, causal_feature, affected_feature):
+        self.causal_feature_id = causal_feature.fid
+        self.causal_feature: Feature = causal_feature
+        self.affected_feature_id = affected_feature.fid
+        self.affected_feature: Feature = affected_feature
+
+        self.rng = affected_feature.generator._rng
+
+        window_possible_start, window_possible_end = min(args.interact_range), max(args.interact_range)
+        window_possible = list(range(window_possible_start, (window_possible_end + 1)))
+
+        self.interaction_strength = self.rng.uniform(-args.interact_scaling, args.interact_scaling)
+
+        window = self.rng.choice(window_possible, size=2)
+        self.window_start = np.min(window)
+        self.window_end = np.max(window)
+        self.window_aggregation_function = ['mean', 'min', 'max'][self.rng.choice([0, 1, 2])]
+
 
 class Feature(ABC):
     """Feature base class"""
@@ -18,6 +37,7 @@ class Feature(ABC):
         # Initialize relevance
         self.important = False
         self.effect_size = 0
+        self.fid = -1
 
     def sample(self, *args, **kwargs):
         """Sample value for feature"""
@@ -67,27 +87,28 @@ class TemporalFeature(Feature):
         raw_value =  self.generator.sample(sequence_length=1)
         final_value = raw_value.item()
 
-        for interaction in self.interactions:
-            # We ignore values that are outside of the measured time series on account of burn-in period
-            if time_point + interaction['w_start'] >= 0:
+        if self.interactions is not None:
+            for interaction in self.interactions:
+                # We ignore values that are outside of the measured time series on account of burn-in period
+                if time_point + interaction.window_start >= 0:
 
-                inter_fid = interaction['inter_fid'].item()
-                inter_subsample = ts_sample[inter_fid, time_point + interaction['w_start']:time_point + interaction['w_end'] + 1].flatten()
+                    # inter_fid = interaction['inter_fid'].item()
+                    inter_subsample = ts_sample[interaction.causal_feature_id, time_point + interaction.window_start:time_point + interaction.window_end + 1].flatten()
 
-                if interaction['w_fn'] == 'mean':
-                    for i, x in enumerate(inter_subsample):
-                        contribution = (x * interaction['inter_scale']) / len(inter_subsample)
+                    if interaction.window_aggregation_function == 'mean':
+                        for i, x in enumerate(inter_subsample):
+                            contribution = (x * interaction.interaction_strength) / len(inter_subsample)
+                            final_value += contribution
+                    elif interaction.window_aggregation_function == 'min':
+                        min_loc = np.argmin(inter_subsample)
+                        contribution = (inter_subsample[min_loc] * interaction.interaction_strength)
                         final_value += contribution
-                elif interaction['w_fn'] == 'min':
-                    min_loc = np.argmin(inter_subsample)
-                    contribution = (inter_subsample[min_loc] * interaction['inter_scale'])
-                    final_value += contribution
-                elif interaction['w_fn'] == 'max':
-                    max_loc = np.argmax(inter_subsample)
-                    contribution = (inter_subsample[max_loc] * interaction['inter_scale'])
-                    final_value += contribution
-                else:
-                    raise NotImplementedError()
+                    elif interaction.window_aggregation_function == 'max':
+                        max_loc = np.argmax(inter_subsample)
+                        contribution = (inter_subsample[max_loc] * interaction.interaction_strength)
+                        final_value += contribution
+                    else:
+                        raise NotImplementedError()
 
         return final_value
 
