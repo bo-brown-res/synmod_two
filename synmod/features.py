@@ -86,30 +86,24 @@ class TemporalFeature(Feature):
     def sample_timepoint(self, args, time_point, ts_sample, feature_id, **kwargs):
         raw_value =  self.generator.sample(sequence_length=1)
         final_value = raw_value.item()
+        contributions = 0.0
 
         if self.interactions is not None:
             for interaction in self.interactions:
                 # We ignore values that are outside of the measured time series on account of burn-in period
                 if time_point + interaction.window_start >= 0:
-
-                    # inter_fid = interaction['inter_fid'].item()
                     inter_subsample = ts_sample[interaction.causal_feature_id, time_point + interaction.window_start:time_point + interaction.window_end + 1].flatten()
 
                     if interaction.window_aggregation_function == 'mean':
-                        for i, x in enumerate(inter_subsample):
-                            contribution = (x * interaction.interaction_strength) / len(inter_subsample)
-                            final_value += contribution
+                        contributions += np.mean(inter_subsample) * interaction.interaction_strength
                     elif interaction.window_aggregation_function == 'min':
-                        min_loc = np.argmin(inter_subsample)
-                        contribution = (inter_subsample[min_loc] * interaction.interaction_strength)
-                        final_value += contribution
+                        contributions += np.min(inter_subsample) * interaction.interaction_strength
                     elif interaction.window_aggregation_function == 'max':
-                        max_loc = np.argmax(inter_subsample)
-                        contribution = (inter_subsample[max_loc] * interaction.interaction_strength)
-                        final_value += contribution
+                        contributions += np.max(inter_subsample) * interaction.interaction_strength
                     else:
                         raise NotImplementedError()
-
+                    
+        final_value += contributions
         return final_value
 
 
@@ -171,11 +165,11 @@ def get_feature(args, fid):
     aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
 
     kwargs = {"window_independent": args.window_independent}
-    kwargs['trend_start_prob'] = args.trend_start_prob
-    kwargs['trend_stop_prob'] = args.trend_stop_prob
-    kwargs['trend_strength'] = args.trend_strength
-    kwargs['variance_scaling'] = argstr_to_list(args.variance_scaling, 'variance_scaling', args)[fid]
-    kwargs['observation_prob'] = argstr_to_list(args.observation_prob, 'observation_prob', args)[fid]
+    kwargs['trend_start_prob'] = args.trend_start_prob[fid]
+    kwargs['trend_stop_prob'] = args.trend_stop_prob[fid]
+    kwargs['trend_strength'] = args.trend_strength[fid]
+    kwargs['variance_scaling'] = args.variance_scaling[fid]
+    kwargs['observation_prob'] = args.observation_prob[fid]
 
     feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
     if aggregation_fn_cls is Max:

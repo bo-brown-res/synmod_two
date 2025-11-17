@@ -209,17 +209,19 @@ def pipeline(args):
     model = M.get_model(args, features, instances)
 
     #Generate labels and get the input-data contributions to the label generation
-    gt_predictions, gt_contributors = ground_truth_estimation(args, features, instances, model)
+    true_labels, true_contrib_feat_idxs = ground_truth_estimation(args, instances, model)
 
     #Save the model, features, contributions and generated data
-    write_outputs(args, features, instances, model, gt_predictions, gt_contributors)
+    pickle.dump(instances, open(f"{args.output_dir}/instances.pkl", "wb"))
+    write_outputs(args, features, instances, model)
+    # write_outputs(args, features, instances, model, true_labels, true_contrib_feat_idxs)
 
     model_instances = copy.deepcopy(instances)
     model_instances = np.nan_to_num(model_instances, 0)
     test_results = model.predict(model_instances)
     draw_visualize(features, instances, test_results, item_id=0, seq_lengths=seq_lengths)
 
-    return features, instances, model, gt_predictions, gt_contributors
+    return features, instances, model, true_labels, true_contrib_feat_idxs
 
 
 def assign_feature_interactions(args, features):
@@ -259,9 +261,6 @@ def generate_features(args):
 
     for assigned_fid in range(args.num_features):
         features[assigned_fid].fid = assigned_fid
-
-    if args.interactions_max > 0:
-        assign_feature_interactions(args, features)
 
     return features
 
@@ -327,29 +326,15 @@ def generate_labels(model, instances):
     return model.predict(instances)
 
 
-def ground_truth_estimation(args, features, instances, model):
+def ground_truth_estimation(args, instances, model):
     """Estimate and tag ground truth importance of features"""
     # pylint: disable = protected-access
     args.logger.info("Begin estimating ground truth effects")
 
-    ground_truth_preds, _, realized_values, model_contribs = model.predict(instances)
+    true_labels = model.predict(instances)
+    important_feature_idxes = model.relevant_feature_names
 
-    ground_truth_importance = np.zeros_like(model_contribs)
-
-    for i_time, time_values in enumerate(instance):
-        for i_feat, data_contribs_to_feat_time in enumerate(time_values):
-            model_val = model_contribs[i_instance, i_feat, i_time]
-            for xx in range(len(data_contribs_to_feat_time)):
-                data_took_from_f = data_contribs_to_feat_time[xx]['fid']
-                data_took_from_l = data_contribs_to_feat_time[xx]['loc']
-                data_val_for_loc = data_contribs_to_feat_time[xx]['val']
-                ground_truth_importance[i_instance, data_took_from_f, data_took_from_l] += model_val * data_val_for_loc
-
-    #normalize importances by instance using min-max scaling
-    for loc, inst in enumerate(ground_truth_importance):
-        new_inst = (inst - inst.min()) / (inst.max() - inst.min())
-        ground_truth_importance[loc] = new_inst
-    return ground_truth_preds, ground_truth_importance
+    return true_labels, important_feature_idxes
 
 
 def write_outputs(args, features, instances, model):

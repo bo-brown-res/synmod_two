@@ -135,7 +135,7 @@ class RandomWalk(Generator):
             sequence[timestep] = value
 
             # Set next state
-            cur_state = cur_state.transition()
+            # cur_state = cur_state.transition()
 
             #Determine if a trend is starting or stopping
             if self._is_trending:

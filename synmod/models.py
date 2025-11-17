@@ -155,7 +155,7 @@ def update_interaction_terms(args, relevant_features, relevant_feature_map, sym_
     """Pairwise interaction terms for polynomial"""
     # TODO: higher-order interactions
     num_relevant_features = len(relevant_features)
-    num_model_interactions = min(args.num_model_interactions, num_relevant_features * (num_relevant_features - 1) / 2)
+    num_model_interactions = min(0, num_relevant_features * (num_relevant_features - 1) / 2)
     if not num_model_interactions:
         return sym_polynomial_fn
     potential_pairs = np.array(list(itertools.combinations(sorted(relevant_features), 2)))
