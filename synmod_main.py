@@ -5,12 +5,12 @@ def main():
     args = argparse.Namespace()
     args.num_instances = 10
     args.num_features = 10
-    args.sequence_length = 20
+    # args.sequence_length = 100
     args.model_type = "regressor"  # regressor/classifier
     args.fraction_relevant_features = 0.5
     args.window_independent = False  # Sequence dependence on windows
     args.output_dir = "synmod_outputs"
-    args.seed = 42
+    args.seed = 42+6
     args.num_interactions = 0 #TODO: remove mentions
     args.include_interaction_only_features = False #TODO remove mentions
     args.synthesis_type = "temporal"  # Don't alter #TODO: remove
@@ -25,7 +25,7 @@ def main():
     args.standardize_features = False
     args.write_outputs = True
 
-    args.expected_seq_length = 20
+    args.expected_seq_length = 100
     args.min_seq_len = 10
     args.interactions_max = 5
     args.interact_range = [-5,-1]

@@ -10,6 +10,7 @@ import os
 import pickle
 
 import cloudpickle
+from matplotlib import pyplot as plt
 import numpy as np
 
 from synmod import constants
@@ -54,7 +55,7 @@ def main(strargs=None):
                         default=None, type=int)
     common.add_argument("-write_outputs", help="flag to enable writing outputs (alternative to using python API)",
                         type=strtobool)
-    common.add_argument("-feature_type_distribution", help="option to specify distribution of binary/categorical/numeric"
+    common.add_argument("-feature_type_distribution", help="option to specify distribution of binary/categorical/numeric/constant"
                         "features types", nargs=4, type=float, default=[0.2, 0.2, 0.5, 0.1])
 
     # Temporal synthesis arguments
@@ -213,17 +214,54 @@ def pipeline(args):
 
     #Save the model, features, contributions and generated data
     pickle.dump(instances, open(f"{args.output_dir}/instances.pkl", "wb"))
-    write_outputs(args, features, instances, model)
+    # write_outputs(args, features, instances, model)
     # write_outputs(args, features, instances, model, true_labels, true_contrib_feat_idxs)
 
-    model_instances = copy.deepcopy(instances)
-    model_instances = np.nan_to_num(model_instances, 0)
-    test_results = model.predict(model_instances)
-    draw_visualize(features, instances, test_results, item_id=0, seq_lengths=seq_lengths)
+    # model_instances = copy.deepcopy(instances)
+    # model_instances = np.nan_to_num(model_instances, 0)
+    test_results = model.predict(instances)
+
+    simple_plot(args, instances, k=1)
+    # draw_visualize(features, instances, test_results, item_id=0, seq_lengths=seq_lengths)
 
     return features, instances, model, true_labels, true_contrib_feat_idxs
 
+def simple_plot(args, instances, k=None):
+    B, C, T = instances.shape
+    if k is None:
+        k = C
+    
+    cols = int(np.ceil(np.sqrt(C)))
+    rows = int(np.ceil(C / cols))
+    
+    for batch_idx in range(k):
+        fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 3*rows))
+        fig.suptitle(f'Instance {batch_idx + 1}/{B}', fontsize=16, y=0.995)
+        
+        if C == 1:
+            axes = np.array([axes])
+        elif rows == 1 or cols == 1:
+            axes = axes.flatten()
+        else:
+            axes = axes.flatten()
+        
+        for feature_idx in range(C):
+            ax = axes[feature_idx]
+            time_series = instances[batch_idx, feature_idx, :]
+            ax.plot(range(T), time_series, linewidth=2)
+            ax.set_title(f'Feature {feature_idx + 1}')
+            ax.set_xlabel('Time')
+            ax.set_ylabel('Value')
+            ax.grid(True, alpha=0.3)
+        
+        for idx in range(C, len(axes)):
+            axes[idx].set_visible(False)
+        
+        plt.tight_layout()
+        plt.savefig(f'{args.output_dir}/instance_{batch_idx + 1}.png')
+        # plt.show()
 
+        
 def assign_feature_interactions(args, features):
     #Determine which features interact (assigned random value must be within probability threshold)
     interaction_matrix = np.random.uniform(size=[len(features), len(features)])
