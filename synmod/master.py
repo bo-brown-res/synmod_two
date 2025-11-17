@@ -95,7 +95,7 @@ def pipeline(args):
     model = M.get_model(args, features, instances)
     ground_truth_estimation(args, features, instances, model)
     write_outputs(args, features, instances, model)
-    simple_plot(args, instances, k=3)
+    simple_plot(args, instances, k=1)
 
     return features, instances, model
 
@@ -109,7 +109,7 @@ def simple_plot(args, instances, k=None):
     rows = int(np.ceil(C / cols))
     
     for batch_idx in range(k):
-        fig, axes = plt.subplots(rows, cols, figsize=(4*cols, 3*rows))
+        fig, axes = plt.subplots(rows, cols, figsize=(6*cols, 3*rows))
         fig.suptitle(f'Instance {batch_idx + 1}/{B}', fontsize=16, y=0.995)
         
         if C == 1:
@@ -133,7 +133,7 @@ def simple_plot(args, instances, k=None):
         
         plt.tight_layout()
         plt.savefig(f'{args.output_dir}/instance_{batch_idx + 1}.png')
-        plt.show()
+        # plt.show()
 
 
 def generate_features(args):
