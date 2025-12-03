@@ -4,7 +4,7 @@ from abc import ABC
 
 import numpy as np
 
-from synmod.constants import BINARY, CATEGORICAL, NUMERIC, TABULAR
+from synmod.constants import BINARY, CATEGORICAL, CONSTANT, NUMERIC, TABULAR
 from synmod.generators import BernoulliDistribution, CategoricalDistribution, NormalDistribution
 from synmod.generators import BernoulliProcess, MarkovChain
 from synmod.aggregators import Max, get_aggregation_fn_cls
@@ -68,7 +68,7 @@ class TabularNumericFeature(TabularFeature):
 
 class TemporalFeature(Feature):
     """Base class for features that take a sequence of values"""
-    def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls):
+    def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
         super().__init__(name, seed_seq)
         self.window = self.get_window(sequence_length)
         self.generator = None
@@ -77,6 +77,8 @@ class TemporalFeature(Feature):
         self.window_important = False
         self.ordering_important = False
         self.window_ordering_important = False
+        # Initialze observation probability
+        self.observation_probability = self._rng.uniform(kwargs['min_obs_prob'], kwargs['max_obs_prob'])
 
     def sample(self, *args, **kwargs):
         """Sample sequence from generator"""
@@ -104,7 +106,7 @@ class TemporalFeature(Feature):
 class BinaryFeature(TemporalFeature):
     """Binary feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
-        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
+        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs)
         generator_class = self._rng.choice([BernoulliProcess, MarkovChain])
         kwargs["n_states"] = 2
         self.generator = generator_class(self._rng, BINARY, self.window, **kwargs)
@@ -113,7 +115,7 @@ class BinaryFeature(TemporalFeature):
 class CategoricalFeature(TemporalFeature):
     """Categorical feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
-        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
+        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs)
         generator_class = self._rng.choice([MarkovChain])
         kwargs["n_states"] = kwargs.get("n_states", self._rng.integers(3, 5, endpoint=True))
         self.generator = generator_class(self._rng, CATEGORICAL, self.window, **kwargs)
@@ -122,9 +124,16 @@ class CategoricalFeature(TemporalFeature):
 class NumericFeature(TemporalFeature):
     """Numeric feature"""
     def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
-        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls)
+        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs)
         generator_class = self._rng.choice([MarkovChain])
         self.generator = generator_class(self._rng, NUMERIC, self.window, **kwargs)
+
+class ConstantFeature(TemporalFeature):
+    """Constant feature"""
+    def __init__(self, name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs):
+        super().__init__(name, seed_seq, sequence_length, aggregation_fn_cls, **kwargs)
+        generator_class = self._rng.choice([MarkovChain])
+        self.generator = generator_class(self._rng, CONSTANT, self.window, **kwargs)
 
 
 def get_feature(args, name):
@@ -137,8 +146,10 @@ def get_feature(args, name):
         return feature_class(name, seed_seq)
     else:
         aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
-        kwargs = {"window_independent": args.window_independent}
-        feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature], p=args.feature_type_distribution)
+        kwargs = {"window_independent": args.window_independent,
+                  "min_obs_prob": args.min_obs_prob,
+                  "max_obs_prob": args.max_obs_prob}
+        feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
         if aggregation_fn_cls is Max:
             # Avoid low-variance features by sampling numeric or high-state-count categorical feature
             feature_class = args.rng.choice([CategoricalFeature, NumericFeature], p=[0.25, 0.75])

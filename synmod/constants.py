@@ -7,6 +7,7 @@ SEED = 94756812597749967251918284421845484907  # using np.random.SeedSequence.en
 DISCRETE = "discrete"
 NUMERIC = "numeric"
 BINARY = "binary"
+CONSTANT = "constant"
 CATEGORICAL = "categorical"
 VARIANCE_TEST_COUNT = 100  # number of instances to test a feature's variance with
 

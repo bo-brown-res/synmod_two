@@ -51,8 +51,8 @@ def main(strargs=None):
                         default=None, type=int)
     common.add_argument("-write_outputs", help="flag to enable writing outputs (alternative to using python API)",
                         type=strtobool)
-    common.add_argument("-feature_type_distribution", help="option to specify distribution of binary/categorical/numeric"
-                        "features types", nargs=3, type=float, default=[0.25, 0.25, 0.50])
+    common.add_argument("-feature_type_distribution", help="option to specify distribution of binary/categorical/numeric/constant"
+                        "features types", nargs=3, type=float, default=[0.20, 0.20, 0.50, 0.10])
     # Temporal synthesis arguments
     temporal = parser.add_argument_group("Temporal synthesis parameters")
     temporal.add_argument("-sequence_length", help="Length of regularly sampled sequence",
@@ -65,6 +65,13 @@ def main(strargs=None):
                           choices=[constants.CLASSIFIER, constants.REGRESSOR], default=constants.REGRESSOR)
     temporal.add_argument("-standardize_features", help="add feature standardization (0 mean, 1 SD) to model",
                           type=strtobool)
+    
+    #Observation probability arguments
+    temporal.add_argument("-min_obs_prob", help="minimum observation probability for temporal features",
+                          type=float, default=0.5)
+    temporal.add_argument("-max_obs_prob", help="maximum observation probability for temporal features",
+                          type=float, default=1.0)
+
     args = parser.parse_args(args=strargs)
     if args.synthesis_type == constants.TEMPORAL:
         if args.sequence_length is None:
