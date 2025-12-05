@@ -4,6 +4,8 @@ from abc import ABC
 
 import numpy as np
 
+from scipy.stats import bernoulli
+
 from synmod.constants import BINARY, CATEGORICAL, CONSTANT, NUMERIC, TABULAR
 from synmod.generators import BernoulliDistribution, CategoricalDistribution, NormalDistribution
 from synmod.generators import BernoulliProcess, MarkovChain
@@ -82,7 +84,9 @@ class TemporalFeature(Feature):
 
     def sample(self, *args, **kwargs):
         """Sample sequence from generator"""
-        return self.generator.sample(*args, **kwargs)
+        sample = self.generator.sample(*args, **kwargs)
+        obs_mask = bernoulli.rvs(p=self.observation_probability, size=args[0], random_state=self._rng)
+        return sample, obs_mask
 
     def summary(self):
         summary = super().summary()
@@ -148,7 +152,9 @@ def get_feature(args, name):
         aggregation_fn_cls = get_aggregation_fn_cls(args.rng)
         kwargs = {"window_independent": args.window_independent,
                   "min_obs_prob": args.min_obs_prob,
-                  "max_obs_prob": args.max_obs_prob}
+                  "max_obs_prob": args.max_obs_prob,
+                  "stddev_scaling": args.stddev_scaling,
+                  }
         feature_class = args.rng.choice([BinaryFeature, CategoricalFeature, NumericFeature, ConstantFeature], p=args.feature_type_distribution)
         if aggregation_fn_cls is Max:
             # Avoid low-variance features by sampling numeric or high-state-count categorical feature

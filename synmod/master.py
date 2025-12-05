@@ -52,7 +52,7 @@ def main(strargs=None):
     common.add_argument("-write_outputs", help="flag to enable writing outputs (alternative to using python API)",
                         type=strtobool)
     common.add_argument("-feature_type_distribution", help="option to specify distribution of binary/categorical/numeric/constant"
-                        "features types", nargs=3, type=float, default=[0.20, 0.20, 0.50, 0.10])
+                        "features types", nargs=4, type=float, default=[0.20, 0.20, 0.50, 0.10])
     # Temporal synthesis arguments
     temporal = parser.add_argument_group("Temporal synthesis parameters")
     temporal.add_argument("-sequence_length", help="Length of regularly sampled sequence",
@@ -71,13 +71,19 @@ def main(strargs=None):
                           type=float, default=0.5)
     temporal.add_argument("-max_obs_prob", help="maximum observation probability for temporal features",
                           type=float, default=1.0)
+    
+    #Variance scaling arguments
+    temporal.add_argument("-stddev_scaling", help="scale standard deviation of binary/categorical/numeric/constant",
+                            nargs=4, type=float, default=[0.05, 0.05, 0.05, 0.05])
+    temporal.add_argument("-only_near_transition_prob", help="probability of only allowing transitions to nearby states for categorical features",
+                            type=float, default=0.5)
 
     args = parser.parse_args(args=strargs)
     if args.synthesis_type == constants.TEMPORAL:
         if args.sequence_length is None:
             parser.error(f"-sequence_length required for -synthesis_type {constants.TEMPORAL}")
         elif args.sequence_length <= 1:
-            parser.error(f"-sequence_length must be greater than 1 for synthesis_type {constants.TEMPORAL}")
+            parser.error(f"-sequence_length must be greater than 1 fostddev_scalingr synthesis_type {constants.TEMPORAL}")
     else:
         args.sequence_length = 1
     return pipeline(args)
@@ -98,7 +104,7 @@ def pipeline(args):
     configure(args)
     args.logger.info(f"Begin generating sequence data with args: {args}")
     features = generate_features(args)
-    instances = generate_instances(args, features)
+    instances, observation_masks = generate_instances(args, features)
     model = M.get_model(args, features, instances)
     ground_truth_estimation(args, features, instances, model)
     write_outputs(args, features, instances, model)
@@ -110,7 +116,7 @@ def pipeline(args):
 def simple_plot(args, instances, k=None):
     B, C, T = instances.shape
     if k is None:
-        k = C
+        k = 1
     
     cols = int(np.ceil(np.sqrt(C)))
     rows = int(np.ceil(C / cols))
@@ -151,10 +157,21 @@ def generate_features(args):
             instances = np.array([feature.sample() for _ in range(constants.VARIANCE_TEST_COUNT)])
             aggregated = instances
         else:
-            instances = np.array([feature.sample(args.sequence_length) for _ in range(constants.VARIANCE_TEST_COUNT)])
+            instances = []
+            obs_mask = []
+            for i in range(constants.VARIANCE_TEST_COUNT):
+                x, o = feature.sample(args.sequence_length)
+                instances.append(x)
+                obs_mask.append(o)
+            instances = np.array(instances)
+            obs_mask = np.array(obs_mask)
             left, right = feature.window
             aggregated = feature.aggregation_fn.operate(instances[:, left: right + 1])
-        return np.var(aggregated) > 1e-10
+        
+        check_results = True
+        if feature.generator._feature_type != constants:
+            check_results = np.var(aggregated) > 1e-10
+        return check_results
 
     # TODO: allow across-feature interactions
     features = [None] * args.num_features
@@ -178,9 +195,13 @@ def generate_instances(args, features):
             instances[sid] = [feature.sample() for feature in features]
     else:
         instances = np.empty((args.num_instances, args.num_features, args.sequence_length))
+        obs_masks = np.empty((args.num_instances, args.num_features, args.sequence_length))
         for sid in range(args.num_instances):
-            instances[sid] = [feature.sample(args.sequence_length) for feature in features]
-    return instances
+            for fid, feature in enumerate(features):
+                x, o = feature.sample(args.sequence_length)
+                instances[sid, fid] = x
+                obs_masks[sid, fid] = o
+    return instances, obs_masks
 
 
 def generate_labels(model, instances):

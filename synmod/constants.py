@@ -11,6 +11,14 @@ CONSTANT = "constant"
 CATEGORICAL = "categorical"
 VARIANCE_TEST_COUNT = 100  # number of instances to test a feature's variance with
 
+#feature type to index map #binary/categorical/numeric/constant
+FEATURE_TYPE_MAP = { 
+    BINARY: 0,
+    CATEGORICAL: 1,
+    NUMERIC: 2,
+    CONSTANT: 3,
+}
+
 # Models
 CLASSIFIER = "classifier"
 REGRESSOR = "regressor"

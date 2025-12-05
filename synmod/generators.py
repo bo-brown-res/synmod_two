@@ -7,7 +7,7 @@ import numpy as np
 import graphviz
 from scipy.stats import bernoulli
 
-from synmod.constants import NUMERIC
+from synmod.constants import CATEGORICAL, CONSTANT, FEATURE_TYPE_MAP, NUMERIC
 
 IN_WINDOW = "in-window"
 OUT_WINDOW = "out-window"
@@ -30,7 +30,7 @@ class BernoulliDistribution(TabularGenerator):
     """Bernoulli distribution generator"""
     def __init__(self, rng, **kwargs):
         super().__init__(rng)
-        self._p = kwargs.get("p", self._rng.uniform(0.01, 0.99))
+        self._p = kwargs.get("p", self._rng.uniform(low=0.01, high=0.99))
 
     def sample(self):
         return self._rng.binomial(1, self._p)
@@ -62,8 +62,8 @@ class NormalDistribution(TabularGenerator):
     """Normal distribution generator"""
     def __init__(self, rng):
         super().__init__(rng)
-        self._mean = rng.uniform(-1, 1)
-        self._sd = rng.uniform(0.1) * 0.05
+        self._mean = rng.uniform(low=-1, high=1)
+        self._sd = rng.uniform(low=0.1) * 0.05
 
     def sample(self):
         return self._rng.normal(self._mean, self._sd)
@@ -95,7 +95,7 @@ class BernoulliProcess(Generator):
     """Bernoulli process generator"""
     def __init__(self, rng, feature_type, window, **kwargs):
         super().__init__(rng, feature_type, window)
-        self._p = kwargs.get("p", self._rng.uniform(0.01, 0.99))
+        self._p = kwargs.get("p", self._rng.uniform(low=0.01, high=0.99))
         self._window_independent = kwargs.get("window_independent", True)  # Sampled value independent of window location
 
     def sample(self, sequence_length):
@@ -135,7 +135,7 @@ class MarkovChain(Generator):
     class State():
         """Markov chain state"""
         # pylint: disable = protected-access, too-many-instance-attributes
-        def __init__(self, chain, index, state_type):
+        def __init__(self, chain, index, state_type, only_near_prob, stddev_scaling):
             self._chain = chain  # Parent Markov chain
             self._index = index  # state identifier
             self._state_type = state_type  # state type - in-window vs. out-window
@@ -145,6 +145,9 @@ class MarkovChain(Generator):
             self.sample = None  # Function to sample from state distribution
             if self._chain._feature_type == NUMERIC:
                 self._summary_stats = SummaryStats(None, None)
+            self.stddev_scaling = stddev_scaling[FEATURE_TYPE_MAP[self._chain._feature_type]]
+            self.only_near_prob = only_near_prob
+            self.only_nearby_transitions = None  # Only allow transitions to nearby states
 
         def gen_distributions(self):
             """Generate state transition and sampling distributions"""
@@ -152,10 +155,17 @@ class MarkovChain(Generator):
             rng = self._chain._rng
             self._states = self._chain._in_window_states if self._state_type == IN_WINDOW else self._chain._out_window_states
             n_states = len(self._states)
-            self._p = rng.uniform(size=n_states)
+            
+            self._p = rng.uniform(size=n_states, low=0.0, high=1.0)
+            self.only_nearby_transitions = rng.choice([True, False], p=[self.only_near_prob, 1 - self.only_near_prob])
+            if self.only_nearby_transitions:
+                for i in range(n_states):
+                    if abs(i - self._index) > 1:
+                        self._p[i] = 0.0
+
             if feature_type == NUMERIC:
-                mean = rng.uniform(0.1)
-                sd = rng.uniform(0.1) * 0.05
+                mean = rng.uniform(low=0.1)
+                sd = rng.uniform(low=0.1) * self.stddev_scaling  #0.05
                 if self._chain._trends:
                     if self._index == 0:
                         pass  # Increase
@@ -164,9 +174,12 @@ class MarkovChain(Generator):
                     elif self._index == 2:
                         mean = 0  # Stay constant
                     else:
-                        mean = rng.uniform(-1, 1)  # Random
+                        mean = rng.uniform(low=-1, high=1)  # Random
                 self._summary_stats = SummaryStats(mean, sd)
                 self.sample = lambda: rng.normal(mean, sd)
+            elif feature_type == CONSTANT:
+                mean = rng.uniform(low=0.1)
+                self.sample = lambda: rng.normal(mean, 0)
             else:  # binary/categorical variable
                 self.sample = lambda: self._index
             self._p /= self._p.sum()  # normalize transition probabilities
@@ -179,18 +192,35 @@ class MarkovChain(Generator):
     def __init__(self, rng, feature_type, window, **kwargs):
         super().__init__(rng, feature_type, window)
         n_states = kwargs.get("n_states", self._rng.integers(2, 5, endpoint=True))
+        stddev_scaling = kwargs.get("stddev_scaling", 0.05)
+        only_near_prob = kwargs.get("only_near_transition_prob", 0.5)
         self._window_independent = kwargs.get("window_independent", False)  # Sampled state independent of window location
+        
         # If trends enabled, sampled values increase/decrease/stay constant according to trends corresponding to each state:
         self._trends = self._rng.choice([True, False]) if self._feature_type == NUMERIC else False
         if self._trends and not self._window_independent:
             n_states = min(n_states, 4)  # Separate chains in/out of window, so avoid too many trends within window
-        self._init_value = self._rng.uniform(-1, 1)  # Initial value of Markov chain, used for trends
+        
+        only_nearby_transitions = False
+        if self._feature_type == CATEGORICAL:
+            only_nearby_transitions = self._rng.choice([True, False], p=[only_near_prob, 1-only_near_prob])
+
+
+        self._init_value = self._rng.uniform(low=-1, high=1)  # Initial value of Markov chain, used for trends
         # Select states inside and outside window
-        self._in_window_states = [self.State(self, index, IN_WINDOW) for index in range(n_states)]
+        self._in_window_states = [self.State(self, 
+                                             index, 
+                                             IN_WINDOW, 
+                                             only_near_prob=only_near_prob, 
+                                             stddev_scaling=stddev_scaling) for index in range(n_states)]
         self._out_window_states = self._in_window_states
         if not self._window_independent:
             # Create separate chain in/out of window
-            self._out_window_states = [self.State(self, index, OUT_WINDOW) for index in range(n_states)]
+            self._out_window_states = [self.State(self, 
+                                                  index, 
+                                                  OUT_WINDOW, 
+                                                  only_near_prob=only_near_prob, 
+                                                  stddev_scaling=stddev_scaling) for index in range(n_states)]
         states = self._in_window_states if self._window_independent else self._in_window_states + self._out_window_states
         for state in states:
             state.gen_distributions()
@@ -262,3 +292,9 @@ class MarkovChain(Generator):
                 states_summary[idx] = state_summary
             summary[stype] = states_summary
         return summary
+
+
+class SemiMarkovChain(MarkovChain):
+    """Semi-Markov chain generator"""
+    def __init__(self, rng, feature_type, window, **kwargs):
+        super().__init__(rng, feature_type, window, **kwargs)
